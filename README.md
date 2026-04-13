@@ -10,6 +10,16 @@ The proxy accepts incoming mTLS connections, extracts a custom extension value f
 cargo build --release
 ```
 
+## Quick start
+
+```bash
+./examples/generate-certs.sh          # creates certs/ directory
+cp config.example.toml config.toml    # edit to taste
+cargo run -- --config config.toml
+```
+
+The generated filenames match `config.example.toml` so no editing is needed for local development. Pass a custom extension value as an argument: `./examples/generate-certs.sh agent-beta`.
+
 ## Configuration
 
 Copy `config.example.toml` to `config.toml` and edit it. Key sections:

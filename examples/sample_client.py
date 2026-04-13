@@ -84,8 +84,24 @@ RESPONSE_MESSAGES = {
 }
 
 
+def _ssl_pending(sock):
+    """Bytes already decrypted and waiting in the OpenSSL read buffer (may be non-empty)."""
+    return sock.pending() if isinstance(sock, ssl.SSLSocket) else 0
+
+
 def wait_for_response(sock, conn, stream_id):
+    """Wait for CONNECT response.
+
+    Uses SSLSocket.pending(): we only count fast recv iterations (draining the OpenSSL read
+    buffer without blocking on the network) toward a livelock limit.
+    """
+    fast = 0
+    max_fast = 100_000
     while True:
+        pending_before = _ssl_pending(sock)
+        if pending_before == 0:
+            fast = 0
+
         data = sock.recv(65535)
         if not data:
             raise ConnectionError("Proxy closed the connection before responding")
@@ -94,6 +110,10 @@ def wait_for_response(sock, conn, stream_id):
         sock.sendall(conn.data_to_send())
 
         for event in events:
+            if isinstance(event, h2.events.ConnectionTerminated):
+                raise ConnectionError(
+                    f"Proxy closed HTTP/2 connection: error_code={event.error_code!r}"
+                )
             if isinstance(event, h2.events.ResponseReceived) and event.stream_id == stream_id:
                 headers = dict(event.headers)
                 status = int(headers[":status"])
@@ -102,9 +122,20 @@ def wait_for_response(sock, conn, stream_id):
             if isinstance(event, h2.events.StreamReset):
                 raise ConnectionError(f"Stream reset by proxy: error code {event.error_code}")
 
+        if pending_before > 0:
+            fast += 1
+            if fast >= max_fast:
+                raise ConnectionError(
+                    "Timed out waiting for CONNECT response (excessive HTTP/2 traffic without response)"
+                )
+
 
 class H2Tunnel:
     """Bidirectional byte pipe over an HTTP/2 DATA stream."""
+
+    # If we keep receiving TLS/plaintext without ever getting DATA for this stream (or EOF),
+    # something is wrong — bail out instead of burning CPU forever.
+    _MAX_FAST_RECV_WITHOUT_APP_DATA = 100_000
 
     def __init__(self, sock, h2_conn, stream_id):
         self._sock = sock
@@ -113,14 +144,14 @@ class H2Tunnel:
         self._buffer = b""
         self._eof = False
 
-    def _read_from_tunnel(self):
-        raw = self._sock.recv(65535)
-        if not raw:
-            self._eof = True
-            return
+    def _process_raw(self, raw):
         events = self._conn.receive_data(raw)
         self._sock.sendall(self._conn.data_to_send())
         for ev in events:
+            if isinstance(ev, h2.events.ConnectionTerminated):
+                raise ConnectionError(
+                    f"Proxy closed HTTP/2 connection: error_code={ev.error_code!r}"
+                )
             if isinstance(ev, h2.events.DataReceived) and ev.stream_id == self._sid:
                 self._conn.acknowledge_received_data(ev.flow_controlled_length, ev.stream_id)
                 self._sock.sendall(self._conn.data_to_send())
@@ -129,8 +160,26 @@ class H2Tunnel:
                 self._eof = True
 
     def recv(self, bufsize):
+        fast = 0
         while not self._buffer and not self._eof:
-            self._read_from_tunnel()
+            pending_before = _ssl_pending(self._sock)
+            if pending_before == 0:
+                fast = 0
+
+            raw = self._sock.recv(65535)
+            if not raw:
+                self._eof = True
+                break
+
+            self._process_raw(raw)
+
+            if not self._buffer and not self._eof and pending_before > 0:
+                fast += 1
+                if fast >= self._MAX_FAST_RECV_WITHOUT_APP_DATA:
+                    raise ConnectionError(
+                        "HTTP/2 tunnel livelock: received many frames but no payload for CONNECT stream"
+                    )
+
         if not self._buffer:
             return b""
         out = self._buffer[:bufsize]
@@ -167,6 +216,10 @@ def tunnel_tls_handshake(tunnel, dest_host, dest_ca=None):
             if not data:
                 raise ConnectionError(f"tunnel closed during TLS handshake with {dest_host}")
             incoming_bio.write(data)
+        except ssl.SSLWantWriteError:
+            out = outgoing_bio.read()
+            if out:
+                tunnel.send(out)
 
     out = outgoing_bio.read()
     if out:
@@ -175,8 +228,25 @@ def tunnel_tls_handshake(tunnel, dest_host, dest_ca=None):
     return ssl_obj, incoming_bio, outgoing_bio
 
 
-def ssl_send(ssl_obj, outgoing_bio, tunnel, data):
-    ssl_obj.write(data)
+def ssl_send(ssl_obj, incoming_bio, outgoing_bio, tunnel, data):
+    view = memoryview(data)
+    while len(view):
+        try:
+            n = ssl_obj.write(view)
+            view = view[n:]
+        except ssl.SSLWantReadError:
+            out = outgoing_bio.read()
+            if out:
+                tunnel.send(out)
+            chunk = tunnel.recv(65535)
+            if not chunk:
+                raise ConnectionError("tunnel closed while sending to destination TLS")
+            incoming_bio.write(chunk)
+        except ssl.SSLWantWriteError:
+            out = outgoing_bio.read()
+            if out:
+                tunnel.send(out)
+
     out = outgoing_bio.read()
     if out:
         tunnel.send(out)
@@ -200,6 +270,10 @@ def ssl_recv(ssl_obj, incoming_bio, outgoing_bio, tunnel, bufsize=4096):
             if not data:
                 break
             incoming_bio.write(data)
+        except ssl.SSLWantWriteError:
+            out = outgoing_bio.read()
+            if out:
+                tunnel.send(out)
         except ssl.SSLZeroReturnError:
             break
     return b"".join(chunks)
@@ -212,7 +286,7 @@ def send_get_request(ssl_obj, incoming_bio, outgoing_bio, tunnel, host):
         f"Connection: close\r\n"
         f"\r\n"
     ).encode()
-    ssl_send(ssl_obj, outgoing_bio, tunnel, request)
+    ssl_send(ssl_obj, incoming_bio, outgoing_bio, tunnel, request)
 
     response_parts = []
     while True:
