@@ -1,0 +1,12 @@
+{
+  "name": "agent-gateway",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+  "runArgs": [
+    "--userns=keep-id"
+  ],
+  "containerUser": "vscode",
+  "updateRemoteUserUID": false,
+  "containerEnv": {
+    "HOME": "/home/vscode"
+  }
+}

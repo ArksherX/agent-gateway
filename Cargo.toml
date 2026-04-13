@@ -1,0 +1,35 @@
+[package]
+name = "agent_gateway"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "*", features = ["full"] }
+rustls = { version = "*", default-features = false, features = ["aws-lc-rs", "logging", "std", "tls12"] }
+tokio-rustls = { version = "*", default-features = false, features = ["aws-lc-rs", "logging", "tls12"] }
+rustls-pemfile = "*"
+rustls-pki-types = "*"
+x509-parser = { version = "*", default-features = false }
+hyper = { version = "*", features = ["server", "http2"] }
+hyper-util = { version = "*", features = ["tokio", "server-auto", "server-graceful"] }
+http = "*"
+http-body-util = "*"
+bytes = "*"
+serde = { version = "*", features = ["derive"] }
+toml = "*"
+async-trait = "*"
+clap = { version = "*", features = ["derive"] }
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter", "json"] }
+tracing-opentelemetry = "*"
+opentelemetry = "*"
+opentelemetry_sdk = { version = "*", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "*", features = ["grpc-tonic"] }
+metrics = "*"
+metrics-exporter-prometheus = "*"
+anyhow = "*"
+
+[dev-dependencies]
+rcgen = { version = "*", features = ["x509-parser"] }
+tokio-test = "*"
+hyper = { version = "*", features = ["client"] }
