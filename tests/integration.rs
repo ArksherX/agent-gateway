@@ -365,6 +365,34 @@ allowed_destinations = ["{dest}"]
     assert!(make("[::1]").is_ok());
 }
 
+#[test]
+fn config_rejects_removed_metrics_bind_field() {
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0:8443"
+tls_cert_path = "c.pem"
+tls_key_path = "k.pem"
+client_ca_path = "ca.pem"
+
+[observability]
+log_level = "info"
+metrics_bind = "0.0.0.0:9090"
+
+[policy]
+client_ext_oid = "1.3.6.1.4.1.57264.1.1"
+
+[[policy.rules]]
+extension_value = "x"
+allowed_destinations = ["api.example.com"]
+"#;
+    let tmpdir = std::env::temp_dir().join("agent_gw_test_config");
+    std::fs::create_dir_all(&tmpdir).ok();
+    let path = tmpdir.join("reject_metrics_bind.toml");
+    std::fs::write(&path, toml).unwrap();
+    let result = agent_gateway::config::Config::load(&path);
+    assert!(result.is_err(), "metrics_bind should be rejected as an unknown field");
+}
+
 // ---- Proxy Destination parsing ----
 
 fn parse_dest(authority: &str) -> Result<Destination, String> {

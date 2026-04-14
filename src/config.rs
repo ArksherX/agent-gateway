@@ -27,7 +27,6 @@ pub struct ServerConfig {
 pub struct ObservabilityConfig {
     pub log_level: String,
     pub otlp_endpoint: Option<String>,
-    pub metrics_bind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,11 +60,6 @@ impl Config {
         let _oid =
             x509_parser::oid_registry::Oid::from_str(&self.policy.client_ext_oid)
                 .map_err(|e| anyhow::anyhow!("invalid policy.client_ext_oid: {e:?}"))?;
-
-        if let Some(ref bind) = self.observability.metrics_bind {
-            bind.parse::<std::net::SocketAddr>()
-                .map_err(|e| anyhow::anyhow!("invalid observability.metrics_bind: {e}"))?;
-        }
 
         for (i, rule) in self.policy.rules.iter().enumerate() {
             anyhow::ensure!(

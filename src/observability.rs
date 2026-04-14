@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 use anyhow::Context;
@@ -48,17 +47,6 @@ pub fn init(config: &ObservabilityConfig) -> anyhow::Result<()> {
         .with(otel_layer)
         .try_init()
         .context("initializing tracing subscriber")?;
-
-    if let Some(ref bind) = config.metrics_bind {
-        let addr: SocketAddr = bind
-            .parse()
-            .with_context(|| format!("invalid metrics_bind: {bind}"))?;
-
-        metrics_exporter_prometheus::PrometheusBuilder::new()
-            .with_http_listener(addr)
-            .install()
-            .context("installing Prometheus metrics exporter")?;
-    }
 
     Ok(())
 }

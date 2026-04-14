@@ -41,13 +41,12 @@ Copy `config.example.toml` to `config.toml` and edit it. Key sections:
 | `rules[].extension_value` | Value to match in the extension |
 | `rules[].allowed_destinations` | List of `host` or `host:port` entries. Port defaults to `443` if omitted. |
 
-**`[observability]`** -- Logging, tracing, and metrics.
+**`[observability]`** -- Logging and tracing.
 
 | Field | Required | Description |
 |---|---|---|
 | `log_level` | yes | `tracing` filter (e.g. `info`, `debug`, `agent_gateway=debug`) |
 | `otlp_endpoint` | no | OTLP gRPC endpoint for distributed tracing |
-| `metrics_bind` | no | `host:port` for Prometheus metrics scraping |
 
 ## Running
 

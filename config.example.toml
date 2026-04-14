@@ -7,7 +7,6 @@ client_ca_path = "certs/client-ca.pem"
 [observability]
 log_level = "info"
 otlp_endpoint = "http://localhost:4317"
-metrics_bind = "0.0.0.0:9090"
 
 # Custom extension OID to extract from client certs
 [policy]
