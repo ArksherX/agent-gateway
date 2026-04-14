@@ -4,32 +4,30 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio = { version = "*", features = ["full"] }
-rustls = { version = "*", default-features = false, features = ["aws-lc-rs", "logging", "std", "tls12"] }
-tokio-rustls = { version = "*", default-features = false, features = ["aws-lc-rs", "logging", "tls12"] }
-rustls-pemfile = "*"
-rustls-pki-types = "*"
-x509-parser = { version = "*", default-features = false }
-hyper = { version = "*", features = ["server", "http2"] }
-hyper-util = { version = "*", features = ["tokio", "server-auto", "server-graceful"] }
-http = "*"
-http-body-util = "*"
-bytes = "*"
-serde = { version = "*", features = ["derive"] }
-toml = "*"
-async-trait = "*"
-clap = { version = "*", features = ["derive"] }
-tracing = "*"
-tracing-subscriber = { version = "*", features = ["env-filter", "json"] }
-tracing-opentelemetry = "*"
-opentelemetry = "*"
-opentelemetry_sdk = { version = "*", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "*", features = ["grpc-tonic"] }
-metrics = "*"
-metrics-exporter-prometheus = "*"
-anyhow = "*"
+tokio = { version = "1", features = ["full"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "logging", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "logging", "tls12"] }
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+x509-parser = { version = "0.18", default-features = false }
+hyper = { version = "1", features = ["server", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.32"
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
+anyhow = "1"
 
 [dev-dependencies]
-rcgen = { version = "*", features = ["x509-parser"] }
-tokio-test = "*"
-hyper = { version = "*", features = ["client"] }
+rcgen = { version = "0.14", features = ["x509-parser"] }
+tokio-test = "0.4"
+hyper = { version = "1", features = ["client"] }
