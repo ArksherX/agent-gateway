@@ -120,6 +120,8 @@ pub fn normalize_destination(dest: &str) -> anyhow::Result<String> {
 #[async_trait]
 impl PolicyEngine for TomlPolicyEngine {
     async fn evaluate(&self, ctx: &RequestContext) -> PolicyDecision {
+        // The leaf (end-entity) certificate is always first in the chain;
+        // remaining entries are intermediates used for chain-of-trust validation.
         let Some(peer_cert_der) = ctx.peer_certificates.first() else {
             return PolicyDecision::Deny {
                 reason: "no client certificate".into(),
