@@ -1,8 +1,10 @@
 [server]
 listen_addr = "0.0.0.0:8443"
-tls_cert_path = "certs/proxy.pem"
-tls_key_path = "certs/proxy-key.pem"
-client_ca_path = "certs/client-ca.pem"
+tls_cert_path = "certs/server.pem"
+tls_key_path = "certs/server-key.pem"
+# Concatenated PEM of per-machine client CAs (from connect.sh: machine-client-ca.pem).
+# Append one -----BEGIN CERTIFICATE----- block per enrolled machine; restart the gateway to load.
+client_ca_path = "certs/client-ca-bundle.pem"
 
 [observability]
 log_level = "info"
@@ -15,7 +17,7 @@ client_ext_oid = "1.3.6.1.4.1.57264.1.1"
 [[policy.rules]]
 extension_value = "agent-alpha"
 # Port defaults to 443 when omitted.
-allowed_destinations = ["api.example.com", "db.internal.com:5432"]
+allowed_destinations = ["api.example.com", "db.internal.com:5432", "api.anthropic.com:443"]
 
 [[policy.rules]]
 extension_value = "agent-beta"

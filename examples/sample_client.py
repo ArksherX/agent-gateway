@@ -15,9 +15,9 @@ Usage:
   python sample_client.py \\
       --proxy-host 127.0.0.1 \\
       --proxy-port 8443 \\
-      --client-cert certs/client.pem \\
-      --client-key certs/client-key.pem \\
-      --ca-cert certs/proxy-ca.pem \\
+      --client-cert ~/.local/share/agent-gateway/machine-client.pem \\
+      --client-key ~/.local/share/agent-gateway/machine-client-key.pem \\
+      --ca-cert certs/server-ca.pem \\
       --destination api.example.com:443 \\
       --dest-ca certs/dest-ca.pem  # optional, uses system CAs if omitted
 """

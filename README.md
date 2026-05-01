@@ -13,12 +13,21 @@ cargo build --release
 ## Quick start
 
 ```bash
-./examples/generate-certs.sh          # creates certs/ directory
+./examples/generate-certs.sh          # server CA + gateway cert under certs/
 cp config.example.toml config.toml    # edit to taste
-cargo run -- --config config.toml
 ```
 
-The generated filenames match `config.example.toml` so no editing is needed for local development. Pass a custom extension value as an argument: `./examples/generate-certs.sh agent-beta`.
+`generate-certs.sh` only creates **server** TLS material (`server-ca.pem`, `server.pem`, …). Each machine (including yours) enrolls with `./examples/connect.sh` (see below), which appends `machine-client-ca.pem` to `client_ca_path`. The gateway needs **at least one** such CA in `certs/client-ca-bundle.pem` before the first start.
+
+Typical first-time flow:
+
+1. `./examples/generate-certs.sh` and `cp config.example.toml config.toml`.
+2. `./examples/connect.sh --gateway 127.0.0.1:8443 --gateway-ca certs/server-ca.pem` — it creates `machine-client-ca.pem` under `~/.local/share/agent-gateway/` (or `$XDG_DATA_HOME`). Append that file to `client_ca_path` (e.g. `cat … >> certs/client-ca-bundle.pem`).
+3. Start the gateway (`cargo run -- --config config.toml`), then return to the terminal running `connect.sh` and press Enter to start the sidecar and Claude.
+
+On later runs, start the gateway first, run `connect.sh`, and press Enter after confirming the machine CA is still registered (always required after `--regenerate-certs`).
+
+Pass a custom policy extension value: `connect.sh ... --extension-value agent-beta`.
 
 ## Configuration
 
@@ -31,7 +40,7 @@ Copy `config.example.toml` to `config.toml` and edit it. Key sections:
 | `listen_addr` | yes | `host:port` to bind (e.g. `0.0.0.0:8443`) |
 | `tls_cert_path` | yes | PEM server certificate |
 | `tls_key_path` | yes | PEM private key for the server cert |
-| `client_ca_path` | yes | PEM CA that issued client certificates |
+| `client_ca_path` | yes | PEM bundle of per-machine client CAs (append each `machine-client-ca.pem`) |
 
 **`[policy]`** -- Maps certificate extension values to allowed destinations.
 
