@@ -56,7 +56,6 @@ impl TomlPolicyEngine {
             rules,
         })
     }
-
 }
 
 /// Parse a destination string into canonical lowercase `host:port` (or
@@ -94,8 +93,11 @@ pub fn normalize_destination(dest: &str) -> anyhow::Result<String> {
         (host_inner.to_owned(), port)
     } else if dest.matches(':').count() > 1 {
         // Multiple colons without brackets: treat as bare IPv6, validate.
-        dest.parse::<std::net::Ipv6Addr>()
-            .map_err(|_| anyhow::anyhow!("ambiguous multi-colon destination {dest:?}; use [ipv6]:port for IPv6 with port"))?;
+        dest.parse::<std::net::Ipv6Addr>().map_err(|_| {
+            anyhow::anyhow!(
+                "ambiguous multi-colon destination {dest:?}; use [ipv6]:port for IPv6 with port"
+            )
+        })?;
         (dest.to_owned(), 443)
     } else if let Some((host, port_str)) = dest.rsplit_once(':') {
         match port_str.parse::<u16>() {

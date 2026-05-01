@@ -113,8 +113,7 @@ async fn tunnel_policy_deny() {
     );
 
     let events = wait_for_event(&log, "CONNECT denied", EVENT_TIMEOUT).await;
-    let denied_evt =
-        find_event(&events, "CONNECT denied").expect("expected CONNECT denied event");
+    let denied_evt = find_event(&events, "CONNECT denied").expect("expected CONNECT denied event");
     assert!(
         denied_evt.fields.get("reason").is_some(),
         "CONNECT denied event should have reason field"

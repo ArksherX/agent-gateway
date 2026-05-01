@@ -97,10 +97,7 @@ impl GatewayConnector {
     }
 
     /// Send a CONNECT request to the gateway. On connection error, reconnect once and retry.
-    pub async fn send_connect(
-        &self,
-        authority: &str,
-    ) -> anyhow::Result<Response<Incoming>> {
+    pub async fn send_connect(&self, authority: &str) -> anyhow::Result<Response<Incoming>> {
         let req = build_connect_request(authority)?;
         let mut sender = self.get_sender().await?;
 

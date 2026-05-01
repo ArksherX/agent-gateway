@@ -57,9 +57,8 @@ impl Config {
             .parse::<std::net::SocketAddr>()
             .map_err(|e| anyhow::anyhow!("invalid server.listen_addr: {e}"))?;
 
-        let _oid =
-            x509_parser::oid_registry::Oid::from_str(&self.policy.client_ext_oid)
-                .map_err(|e| anyhow::anyhow!("invalid policy.client_ext_oid: {e:?}"))?;
+        let _oid = x509_parser::oid_registry::Oid::from_str(&self.policy.client_ext_oid)
+            .map_err(|e| anyhow::anyhow!("invalid policy.client_ext_oid: {e:?}"))?;
 
         for (i, rule) in self.policy.rules.iter().enumerate() {
             anyhow::ensure!(
@@ -72,9 +71,7 @@ impl Config {
             );
             for (j, dest) in rule.allowed_destinations.iter().enumerate() {
                 policy::normalize_destination(dest).map_err(|e| {
-                    anyhow::anyhow!(
-                        "policy.rules[{i}].allowed_destinations[{j}]: {e}"
-                    )
+                    anyhow::anyhow!("policy.rules[{i}].allowed_destinations[{j}]: {e}")
                 })?;
             }
         }

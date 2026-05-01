@@ -26,7 +26,11 @@ pub fn build_server_config(config: &AppServerConfig) -> anyhow::Result<Arc<Serve
         "unparseable certificates in {}",
         config.client_ca_path.display()
     );
-    ensure!(added > 0, "no trust anchors in {}", config.client_ca_path.display());
+    ensure!(
+        added > 0,
+        "no trust anchors in {}",
+        config.client_ca_path.display()
+    );
 
     let client_verifier = WebPkiClientVerifier::builder(Arc::new(client_ca_store))
         .build()

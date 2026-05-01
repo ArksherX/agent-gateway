@@ -40,8 +40,7 @@ pub fn generate_ca() -> Result<CertifiedIssuer<'static, KeyPair>, rcgen::Error> 
 pub fn generate_server_cert(
     issuer: &CertifiedIssuer<'_, impl rcgen::SigningKey>,
 ) -> Result<(rcgen::Certificate, KeyPair), rcgen::Error> {
-    let mut params =
-        CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])?;
+    let mut params = CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])?;
     params.distinguished_name = DistinguishedName::new();
     params
         .distinguished_name
@@ -361,8 +360,7 @@ pub async fn start_proxy(pki: &TestPki, policy_config: PolicyConfig) -> (SocketA
                         return;
                     }
                 };
-                let peer_certs =
-                    agent_gateway::proxy::extract_peer_certs(tls_stream.get_ref().1);
+                let peer_certs = agent_gateway::proxy::extract_peer_certs(tls_stream.get_ref().1);
                 let service = svc.make_service(peer_certs);
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
                 let _ = hyper_util::server::conn::auto::Builder::new(
@@ -425,8 +423,7 @@ pub async fn try_request_with_tls_config(
 
     let io = hyper_util::rt::TokioIo::new(tls_stream);
     let (mut send_request, connection) =
-        hyper::client::conn::http2::handshake(hyper_util::rt::TokioExecutor::new(), io)
-            .await?;
+        hyper::client::conn::http2::handshake(hyper_util::rt::TokioExecutor::new(), io).await?;
 
     tokio::spawn(async move {
         let _ = connection.await;

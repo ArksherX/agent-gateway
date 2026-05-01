@@ -7,9 +7,7 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
 use agent_gateway::config::{PolicyConfig, PolicyRule};
-use agent_gateway::policy::{
-    self, PolicyDecision, PolicyEngine, RequestContext, TomlPolicyEngine,
-};
+use agent_gateway::policy::{self, PolicyDecision, PolicyEngine, RequestContext, TomlPolicyEngine};
 use agent_gateway::proxy::Destination;
 
 fn test_policy_config() -> PolicyConfig {
@@ -103,18 +101,12 @@ fn normalize_bracketed_ipv6_with_port() {
 
 #[test]
 fn normalize_bracketed_ipv6_without_port_defaults_to_443() {
-    assert_eq!(
-        policy::normalize_destination("[::1]").unwrap(),
-        "[::1]:443"
-    );
+    assert_eq!(policy::normalize_destination("[::1]").unwrap(), "[::1]:443");
 }
 
 #[test]
 fn normalize_bare_ipv6_defaults_to_443() {
-    assert_eq!(
-        policy::normalize_destination("::1").unwrap(),
-        "[::1]:443"
-    );
+    assert_eq!(policy::normalize_destination("::1").unwrap(), "[::1]:443");
     assert_eq!(
         policy::normalize_destination("2001:db8::1").unwrap(),
         "[2001:db8::1]:443"
@@ -390,7 +382,10 @@ allowed_destinations = ["api.example.com"]
     let path = tmpdir.join("reject_metrics_bind.toml");
     std::fs::write(&path, toml).unwrap();
     let result = agent_gateway::config::Config::load(&path);
-    assert!(result.is_err(), "metrics_bind should be rejected as an unknown field");
+    assert!(
+        result.is_err(),
+        "metrics_bind should be rejected as an unknown field"
+    );
 }
 
 // ---- Proxy Destination parsing ----
