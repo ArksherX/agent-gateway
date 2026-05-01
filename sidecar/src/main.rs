@@ -1,4 +1,5 @@
 mod bridge;
+mod identity;
 
 use std::fs::File;
 use std::io::BufReader;
@@ -6,17 +7,21 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, anyhow, ensure};
+use anyhow::{Context, ensure};
 use clap::Parser;
 use rustls::ClientConfig;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls_pki_types::{CertificateDer, ServerName};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
 use crate::bridge::GatewayConnector;
+use crate::identity::{TpmClientIdentity, parse_tpm_key_handle};
 
 #[derive(Parser)]
-#[command(name = "agent_gateway_sidecar", about = "Local sidecar that bridges plain HTTP CONNECT to an mTLS h2 gateway")]
+#[command(
+    name = "agent_gateway_sidecar",
+    about = "Local sidecar that bridges plain HTTP CONNECT to an mTLS h2 gateway"
+)]
 struct Cli {
     /// Local listen address
     #[arg(long, default_value = "127.0.0.1:3128")]
@@ -30,9 +35,13 @@ struct Cli {
     #[arg(long)]
     client_cert: PathBuf,
 
-    /// Path to PEM client private key
+    /// TCTI string for the simulated TPM
+    #[arg(long, default_value = "swtpm:host=127.0.0.1,port=2321")]
+    tpm_tcti: String,
+
+    /// Persistent TPM handle for the client signing key
     #[arg(long)]
-    client_key: PathBuf,
+    tpm_key_handle: String,
 
     /// Path to PEM CA certificate that signed the gateway's server cert
     #[arg(long)]
@@ -61,7 +70,9 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let tls_config = build_client_config(&cli.client_cert, &cli.client_key, &cli.ca_cert)?;
+    let tpm_key_handle = parse_tpm_key_handle(&cli.tpm_key_handle)?;
+    let identity = TpmClientIdentity::load(&cli.tpm_tcti, tpm_key_handle, &cli.client_cert)?;
+    let tls_config = build_client_config(identity, &cli.ca_cert)?;
 
     let (gateway_host, gateway_port) = parse_gateway_addr(&cli.gateway)?;
     let gateway_sni = ServerName::try_from(gateway_host.clone())
@@ -97,23 +108,22 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_client_config(
-    cert_path: &Path,
-    key_path: &Path,
+    identity: TpmClientIdentity,
     ca_path: &Path,
 ) -> anyhow::Result<ClientConfig> {
-    let certs = load_certs(cert_path)?;
-    let key = load_private_key(key_path)?;
-
     let mut root_store = rustls::RootCertStore::empty();
     let ca_certs = load_certs(ca_path)?;
     let (added, ignored) = root_store.add_parsable_certificates(ca_certs);
-    ensure!(ignored == 0, "unparseable certificates in {}", ca_path.display());
+    ensure!(
+        ignored == 0,
+        "unparseable certificates in {}",
+        ca_path.display()
+    );
     ensure!(added > 0, "no trust anchors in {}", ca_path.display());
 
     let mut config = ClientConfig::builder()
         .with_root_certificates(root_store)
-        .with_client_auth_cert(certs, key)
-        .context("building client TLS config")?;
+        .with_client_cert_resolver(identity.resolver());
     config.alpn_protocols = vec![b"h2".to_vec()];
 
     Ok(config)
@@ -127,16 +137,11 @@ fn load_certs(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
     Ok(certs)
 }
 
-fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)?
-        .ok_or_else(|| anyhow!("no private key in {}", path.display()))
-}
-
 fn parse_gateway_addr(addr: &str) -> anyhow::Result<(String, u16)> {
     if let Some(rest) = addr.strip_prefix('[') {
-        let (host, after) = rest.split_once(']').context("missing closing ']' in IPv6 address")?;
+        let (host, after) = rest
+            .split_once(']')
+            .context("missing closing ']' in IPv6 address")?;
         ensure!(!host.is_empty(), "empty host in gateway address");
         let port = after
             .strip_prefix(':')
@@ -211,5 +216,17 @@ mod tests {
     #[test]
     fn parse_rejects_empty_bracketed_host() {
         assert!(parse_gateway_addr("[]:443").is_err());
+    }
+
+    #[test]
+    fn parses_tpm_key_handle_hex() {
+        assert_eq!(parse_tpm_key_handle("0x81010004").unwrap(), 0x81010004);
+        assert_eq!(parse_tpm_key_handle("81010004").unwrap(), 0x81010004);
+    }
+
+    #[test]
+    fn rejects_non_persistent_tpm_key_handle() {
+        assert!(parse_tpm_key_handle("0x80000000").is_err());
+        assert!(parse_tpm_key_handle("not-a-handle").is_err());
     }
 }

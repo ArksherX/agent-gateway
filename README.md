@@ -10,6 +10,13 @@ The proxy accepts incoming mTLS connections, extracts a custom extension value f
 cargo build --release
 ```
 
+The sidecar uses a simulated TPM identity. Install the native TPM stack before
+building or running it:
+
+```bash
+sudo apt-get install libtss2-dev swtpm tpm2-tools pkg-config
+```
+
 ## Quick start
 
 ```bash
@@ -17,17 +24,24 @@ cargo build --release
 cp config.example.toml config.toml    # edit to taste
 ```
 
-`generate-certs.sh` only creates **server** TLS material (`server-ca.pem`, `server.pem`, …). Each machine (including yours) enrolls with `./examples/connect.sh` (see below), which appends `machine-client-ca.pem` to `client_ca_path`. The gateway needs **at least one** such CA in `certs/client-ca-bundle.pem` before the first start.
+`generate-certs.sh` only creates **server** TLS material (`server-ca.pem`, `server.pem`, ...). Each agent platform enrolls with `./examples/connect.sh`, which starts a local `swtpm`, creates a persistent P-256 signing key in that simulated TPM, and issues `machine-client.pem` for the TPM public key. The gateway needs the generated `machine-client-ca.pem` in `certs/client-ca-bundle.pem` before it can trust that sidecar.
 
 Typical first-time flow:
 
 1. `./examples/generate-certs.sh` and `cp config.example.toml config.toml`.
-2. `./examples/connect.sh --gateway 127.0.0.1:8443 --gateway-ca certs/server-ca.pem` — it creates `machine-client-ca.pem` under `~/.local/share/agent-gateway/` (or `$XDG_DATA_HOME`). Append that file to `client_ca_path` (e.g. `cat … >> certs/client-ca-bundle.pem`).
+2. `./examples/connect.sh --gateway 127.0.0.1:8443 --gateway-ca certs/server-ca.pem` creates `machine-client-ca.pem` under `~/.local/share/agent-gateway/` (or `$XDG_DATA_HOME`). Append that file to `client_ca_path` (for example, `cat ~/.local/share/agent-gateway/machine-client-ca.pem >> certs/client-ca-bundle.pem`).
 3. Start the gateway (`cargo run -- --config config.toml`), then return to the terminal running `connect.sh` and press Enter to start the sidecar and Claude.
 
-On later runs, start the gateway first, run `connect.sh`, and press Enter after confirming the machine CA is still registered (always required after `--regenerate-certs`).
+On later runs, start the gateway first, run `connect.sh`, and press Enter after confirming the machine CA is still registered. `--regenerate-certs` creates a fresh simulated TPM state and machine client CA, so the new CA must be appended to `client_ca_path`.
 
 Pass a custom policy extension value: `connect.sh ... --extension-value agent-beta`.
+
+The simulated TPM state lives under `~/.local/share/agent-gateway/swtpm/` unless
+`XDG_DATA_HOME` is set. By default, the sidecar uses TCTI
+`swtpm:host=127.0.0.1,port=2321` and persistent handle `0x81010004`; override
+the handle or simulator data port with `connect.sh --tpm-handle` and
+`--swtpm-port`. The swtpm control port is always the data port plus one, which
+matches the TSS swtpm TCTI convention.
 
 ## Configuration
 
