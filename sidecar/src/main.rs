@@ -1,5 +1,6 @@
 mod bridge;
 mod identity;
+mod observability;
 
 use std::fs::File;
 use std::io::BufReader;
@@ -60,12 +61,7 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("failed to install default crypto provider");
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    observability::init()?;
 
     let cli = Cli::parse();
 
@@ -108,6 +104,23 @@ async fn main() -> anyhow::Result<()> {
         "sidecar ready"
     );
 
+    tokio::select! {
+        result = serve_loop(&listener, connector) => {
+            result?;
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("received shutdown signal");
+        }
+    }
+
+    observability::shutdown();
+    Ok(())
+}
+
+async fn serve_loop(
+    listener: &TcpListener,
+    connector: Arc<GatewayConnector>,
+) -> anyhow::Result<()> {
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(conn) => conn,

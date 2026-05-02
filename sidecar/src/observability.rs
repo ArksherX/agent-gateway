@@ -8,18 +8,17 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::config::ObservabilityConfig;
-
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
-pub fn init(config: &ObservabilityConfig) -> anyhow::Result<()> {
+pub fn init() -> anyhow::Result<()> {
     global::set_text_map_propagator(TraceContextPropagator::new());
 
-    let filter = EnvFilter::try_new(&config.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let fmt_layer = stdout_logging_enabled().then(tracing_subscriber::fmt::layer);
 
-    let json_layer = stdout_logging_enabled().then(|| tracing_subscriber::fmt::layer().json());
-
-    let otel_layer = if let Some(ref endpoint) = config.otlp_endpoint {
+    let otel_layer = if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        && !endpoint.is_empty()
+    {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
             .with_endpoint(endpoint)
@@ -27,7 +26,7 @@ pub fn init(config: &ObservabilityConfig) -> anyhow::Result<()> {
             .context("building OTLP span exporter")?;
 
         let resource = Resource::builder_empty()
-            .with_attribute(KeyValue::new("service.name", "agent_gateway"))
+            .with_attribute(KeyValue::new("service.name", "agent_gateway_sidecar"))
             .build();
 
         let provider = SdkTracerProvider::builder()
@@ -35,7 +34,7 @@ pub fn init(config: &ObservabilityConfig) -> anyhow::Result<()> {
             .with_resource(resource)
             .build();
 
-        let tracer = provider.tracer("agent_gateway");
+        let tracer = provider.tracer("agent_gateway_sidecar");
         global::set_tracer_provider(provider.clone());
         let _ = TRACER_PROVIDER.set(provider);
 
@@ -46,7 +45,7 @@ pub fn init(config: &ObservabilityConfig) -> anyhow::Result<()> {
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(json_layer)
+        .with(fmt_layer)
         .with(otel_layer)
         .try_init()
         .context("initializing tracing subscriber")?;

@@ -179,12 +179,17 @@ ensure_tpm_key() {
     rm -f "$CERT_DIR/tpm-signing-key.ctx"
 }
 
-verify_cert_matches_tpm_key() {
+cert_matches_tpm_key() {
+    [[ -f "$CERT_DIR/machine-client.pem" ]] || return 1
     openssl pkey -pubin -in "$CERT_DIR/machine-client-public.pem" -outform DER \
         > "$CERT_DIR/machine-client-public.der"
     openssl x509 -in "$CERT_DIR/machine-client.pem" -pubkey -noout \
         | openssl pkey -pubin -outform DER > "$CERT_DIR/machine-client-cert-public.der"
-    if ! cmp -s "$CERT_DIR/machine-client-public.der" "$CERT_DIR/machine-client-cert-public.der"; then
+    cmp -s "$CERT_DIR/machine-client-public.der" "$CERT_DIR/machine-client-cert-public.der"
+}
+
+verify_cert_matches_tpm_key() {
+    if ! cert_matches_tpm_key; then
         echo "error: machine-client.pem public key does not match simulated TPM key $TPM_HANDLE" >&2
         exit 1
     fi
@@ -194,6 +199,9 @@ start_swtpm
 ensure_tpm_key
 
 if needs_certs; then
+    generate_certs
+elif ! cert_matches_tpm_key; then
+    echo "==> Reissuing machine client certificate for simulated TPM key $TPM_HANDLE"
     generate_certs
 fi
 verify_cert_matches_tpm_key

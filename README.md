@@ -32,7 +32,7 @@ Typical first-time flow:
 2. `./examples/connect.sh --gateway 127.0.0.1:8443 --gateway-ca certs/server-ca.pem` creates `machine-client-ca.pem` under `~/.local/share/agent-gateway/` (or `$XDG_DATA_HOME`). Append that file to `client_ca_path` (for example, `cat ~/.local/share/agent-gateway/machine-client-ca.pem >> certs/client-ca-bundle.pem`).
 3. Start the gateway (`cargo run -- --config config.toml`), then return to the terminal running `connect.sh` and press Enter to start the sidecar and Claude.
 
-On later runs, start the gateway first, run `connect.sh`, and press Enter after confirming the machine CA is still registered. `--regenerate-certs` creates a fresh simulated TPM state and machine client CA, so the new CA must be appended to `client_ca_path`.
+On later runs, start the gateway first, run `connect.sh`, and press Enter after confirming the machine CA is still registered. If `connect.sh` finds an existing simulated TPM key but the saved `machine-client.pem` was issued for a different public key, it reissues `machine-client.pem` for the current TPM key using the existing machine client CA. `--regenerate-certs` creates a fresh simulated TPM state and machine client CA, so the new CA must be appended to `client_ca_path`.
 
 Pass a custom policy extension value: `connect.sh ... --extension-value agent-beta`.
 
@@ -70,6 +70,14 @@ Copy `config.example.toml` to `config.toml` and edit it. Key sections:
 |---|---|---|
 | `log_level` | yes | `tracing` filter (e.g. `info`, `debug`, `agent_gateway=debug`) |
 | `otlp_endpoint` | no | OTLP gRPC endpoint for distributed tracing |
+
+Set `AGENT_GATEWAY_LOG_STDOUT=false` to disable stdout/stderr formatting while
+leaving OTLP export enabled. The sidecar reads observability settings from
+environment variables. Use `RUST_LOG` for its tracing filter and set
+`OTEL_EXPORTER_OTLP_ENDPOINT` (for example, `http://localhost:4317`) to export
+sidecar spans over OTLP. When enabled, the sidecar injects W3C trace-context
+headers into the CONNECT request it sends to the gateway, and the gateway
+continues the same trace.
 
 ## Running
 

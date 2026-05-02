@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::Bytes;
+use http::{HeaderMap, HeaderName, HeaderValue};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
@@ -13,12 +14,15 @@ use hyper::client::conn::http2 as h2_client;
 use hyper::service::Service;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use opentelemetry::global;
+use opentelemetry::propagation::Injector;
 use rustls::ClientConfig;
 use rustls_pki_types::ServerName;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 type Body = BoxBody<Bytes, Infallible>;
 
@@ -198,12 +202,32 @@ fn build_connect_request(authority: &str) -> anyhow::Result<Request<Body>> {
         .build()
         .context("building CONNECT URI")?;
 
-    let req = Request::builder()
+    let mut req = Request::builder()
         .method(Method::CONNECT)
         .uri(uri)
         .body(Empty::<Bytes>::new().boxed())
         .context("building CONNECT request")?;
+    inject_current_trace_context(req.headers_mut());
     Ok(req)
+}
+
+struct HeaderInjector<'a>(&'a mut HeaderMap);
+
+impl Injector for HeaderInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        if let Ok(name) = HeaderName::from_bytes(key.as_bytes())
+            && let Ok(value) = HeaderValue::from_str(&value)
+        {
+            self.0.insert(name, value);
+        }
+    }
+}
+
+fn inject_current_trace_context(headers: &mut HeaderMap) {
+    let context = tracing::Span::current().context();
+    global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&context, &mut HeaderInjector(headers))
+    });
 }
 
 #[derive(Clone)]
@@ -238,106 +262,122 @@ async fn handle(
         None => return response(StatusCode::BAD_REQUEST, "missing authority"),
     };
 
-    info!(
+    let span = tracing::info_span!(
+        "sidecar CONNECT",
         source_identity = %connector.source_identity(),
         source_peer_addr = %source_peer_addr,
         dest_authority = %authority,
         gateway_endpoint = %connector.gateway_endpoint(),
-        "CONNECT request"
     );
 
-    let gw_response = match connector.send_connect(&authority, source_peer_addr).await {
-        Ok(r) => r,
-        Err(e) => {
-            error!(
-                source_identity = %connector.source_identity(),
-                source_peer_addr = %source_peer_addr,
-                dest_authority = %authority,
-                gateway_endpoint = %connector.gateway_endpoint(),
-                error = %e,
-                "gateway connect failed"
-            );
-            return response(StatusCode::BAD_GATEWAY, "gateway unreachable");
-        }
-    };
-
-    let status = gw_response.status();
-    if status != StatusCode::OK {
-        warn!(
+    async move {
+        info!(
             source_identity = %connector.source_identity(),
             source_peer_addr = %source_peer_addr,
             dest_authority = %authority,
             gateway_endpoint = %connector.gateway_endpoint(),
-            %status,
-            "gateway rejected CONNECT"
+            "CONNECT request"
         );
-        return response(status, "gateway denied request");
-    }
 
-    let gw_upgraded = match hyper::upgrade::on(gw_response).await {
-        Ok(u) => u,
-        Err(e) => {
-            error!(
+        let gw_response = match connector.send_connect(&authority, source_peer_addr).await {
+            Ok(r) => r,
+            Err(e) => {
+                error!(
+                    source_identity = %connector.source_identity(),
+                    source_peer_addr = %source_peer_addr,
+                    dest_authority = %authority,
+                    gateway_endpoint = %connector.gateway_endpoint(),
+                    error = %e,
+                    "gateway connect failed"
+                );
+                return response(StatusCode::BAD_GATEWAY, "gateway unreachable");
+            }
+        };
+
+        let status = gw_response.status();
+        if status != StatusCode::OK {
+            warn!(
                 source_identity = %connector.source_identity(),
                 source_peer_addr = %source_peer_addr,
                 dest_authority = %authority,
                 gateway_endpoint = %connector.gateway_endpoint(),
-                error = %e,
-                "gateway upgrade failed"
+                %status,
+                "gateway rejected CONNECT"
             );
-            return response(StatusCode::BAD_GATEWAY, "gateway tunnel failed");
+            return response(status, "gateway denied request");
         }
-    };
 
-    let client_upgrade = hyper::upgrade::on(req);
-    let source_identity = connector.source_identity().to_owned();
-    let gateway_endpoint = connector.gateway_endpoint().to_owned();
-
-    tokio::spawn(async move {
-        let client_upgraded = match client_upgrade.await {
+        let gw_upgraded = match hyper::upgrade::on(gw_response).await {
             Ok(u) => u,
             Err(e) => {
-                warn!(
-                    source_identity = %source_identity,
+                error!(
+                    source_identity = %connector.source_identity(),
                     source_peer_addr = %source_peer_addr,
                     dest_authority = %authority,
-                    gateway_endpoint = %gateway_endpoint,
+                    gateway_endpoint = %connector.gateway_endpoint(),
                     error = %e,
-                    "client upgrade failed"
+                    "gateway upgrade failed"
                 );
-                return;
+                return response(StatusCode::BAD_GATEWAY, "gateway tunnel failed");
             }
         };
 
-        let mut client_io = TokioIo::new(client_upgraded);
-        let mut gw_io = TokioIo::new(gw_upgraded);
+        let client_upgrade = hyper::upgrade::on(req);
+        let source_identity = connector.source_identity().to_owned();
+        let gateway_endpoint = connector.gateway_endpoint().to_owned();
 
-        match copy_bidirectional(&mut client_io, &mut gw_io).await {
-            Ok((up, down)) => {
-                info!(
-                    source_identity = %source_identity,
-                    source_peer_addr = %source_peer_addr,
-                    dest_authority = %authority,
-                    gateway_endpoint = %gateway_endpoint,
-                    bytes_client_to_dest = up,
-                    bytes_dest_to_client = down,
-                    "tunnel closed"
-                );
-            }
-            Err(e) => {
-                error!(
-                    source_identity = %source_identity,
-                    source_peer_addr = %source_peer_addr,
-                    dest_authority = %authority,
-                    gateway_endpoint = %gateway_endpoint,
-                    error = %e,
-                    "tunnel error"
-                );
-            }
-        }
-    });
+        let tunnel_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                let client_upgraded = match client_upgrade.await {
+                    Ok(u) => u,
+                    Err(e) => {
+                        warn!(
+                            source_identity = %source_identity,
+                            source_peer_addr = %source_peer_addr,
+                            dest_authority = %authority,
+                            gateway_endpoint = %gateway_endpoint,
+                            error = %e,
+                            "client upgrade failed"
+                        );
+                        return;
+                    }
+                };
 
-    response(StatusCode::OK, "")
+                let mut client_io = TokioIo::new(client_upgraded);
+                let mut gw_io = TokioIo::new(gw_upgraded);
+
+                match copy_bidirectional(&mut client_io, &mut gw_io).await {
+                    Ok((up, down)) => {
+                        info!(
+                            source_identity = %source_identity,
+                            source_peer_addr = %source_peer_addr,
+                            dest_authority = %authority,
+                            gateway_endpoint = %gateway_endpoint,
+                            bytes_client_to_dest = up,
+                            bytes_dest_to_client = down,
+                            "tunnel closed"
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            source_identity = %source_identity,
+                            source_peer_addr = %source_peer_addr,
+                            dest_authority = %authority,
+                            gateway_endpoint = %gateway_endpoint,
+                            error = %e,
+                            "tunnel error"
+                        );
+                    }
+                }
+            }
+            .instrument(tunnel_span),
+        );
+
+        response(StatusCode::OK, "")
+    }
+    .instrument(span)
+    .await
 }
 
 fn response(status: StatusCode, message: &str) -> Response<Body> {
@@ -476,6 +516,38 @@ mod tests {
     fn connect_request_ipv6() {
         let req = build_connect_request("[::1]:8443").unwrap();
         assert_eq!(req.uri().authority().unwrap().as_str(), "[::1]:8443");
+    }
+
+    #[test]
+    fn connect_request_injects_trace_context_headers() {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::propagation::TraceContextPropagator;
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+
+        let provider = SdkTracerProvider::builder().build();
+        let tracer = provider.tracer("test");
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("sidecar test span");
+            let _guard = span.enter();
+
+            let req = build_connect_request("example.com:443").unwrap();
+            let traceparent = req
+                .headers()
+                .get("traceparent")
+                .and_then(|value| value.to_str().ok())
+                .expect("traceparent should be injected");
+
+            assert!(traceparent.starts_with("00-"));
+            assert_eq!(traceparent.len(), 55);
+        });
+
+        let _ = provider.shutdown();
     }
 
     #[test]

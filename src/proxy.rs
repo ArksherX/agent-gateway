@@ -5,20 +5,40 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use http::HeaderMap;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
 use hyper::service::Service;
 use hyper::{Method, Request, Response, StatusCode};
+use opentelemetry::global;
+use opentelemetry::propagation::Extractor;
 use rustls::ServerConnection;
 use rustls_pki_types::CertificateDer;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::policy::{self, PolicyDecision, PolicyEngine, RequestContext};
 
 type ProxyBody = BoxBody<Bytes, Infallible>;
+
+struct HeaderExtractor<'a>(&'a HeaderMap);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|value| value.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|name| name.as_str()).collect()
+    }
+}
+
+fn extract_trace_context(headers: &HeaderMap) -> opentelemetry::Context {
+    global::get_text_map_propagator(|propagator| propagator.extract(&HeaderExtractor(headers)))
+}
 
 #[derive(Clone)]
 pub struct ProxyService {
@@ -45,116 +65,132 @@ impl ProxyService {
             return response(StatusCode::METHOD_NOT_ALLOWED, "only CONNECT is supported");
         }
 
+        let parent_context = extract_trace_context(req.headers());
         let dest = match Destination::from_request(&req) {
             Ok(d) => d,
             Err(reason) => return response(StatusCode::BAD_REQUEST, &reason),
         };
 
-        let ctx = RequestContext {
-            peer_certificates: self.peer_certs.clone(),
-            destination: dest.authority.clone(),
-        };
+        let span = tracing::info_span!(
+            "gateway CONNECT",
+            source_peer_addr = %self.source_peer_addr,
+            dest_authority = %dest.authority,
+        );
+        let _ = span.set_parent(parent_context);
 
-        let source_identity = match self.policy_engine.evaluate(&ctx).await {
-            PolicyDecision::Allow { source_identity } => {
-                info!(
-                    source_identity = %source_identity,
-                    source_peer_addr = %self.source_peer_addr,
-                    dest_authority = %dest.authority,
-                    policy_decision = "allow",
-                    "CONNECT allowed"
-                );
-                source_identity
-            }
-            PolicyDecision::Deny {
-                source_identity: Some(source_identity),
-                reason,
-            } => {
-                warn!(
-                    source_identity = %source_identity,
-                    source_peer_addr = %self.source_peer_addr,
-                    dest_authority = %dest.authority,
-                    policy_decision = "deny",
-                    deny_reason = %reason,
-                    "CONNECT denied"
-                );
-                return response(StatusCode::FORBIDDEN, "forbidden");
-            }
-            PolicyDecision::Deny {
-                source_identity: None,
-                reason,
-            } => {
-                warn!(
-                    source_peer_addr = %self.source_peer_addr,
-                    dest_authority = %dest.authority,
-                    policy_decision = "deny",
-                    deny_reason = %reason,
-                    "CONNECT denied"
-                );
-                return response(StatusCode::FORBIDDEN, "forbidden");
-            }
-        };
+        async move {
+            let ctx = RequestContext {
+                peer_certificates: self.peer_certs.clone(),
+                destination: dest.authority.clone(),
+            };
 
-        // Connect to destination BEFORE returning 200 so the client knows
-        // the tunnel is actually established.
-        let mut upstream = match TcpStream::connect((&*dest.host, dest.port)).await {
-            Ok(s) => s,
-            Err(e) => {
-                error!(
-                    source_identity = %source_identity,
-                    source_peer_addr = %self.source_peer_addr,
-                    dest_authority = %dest.authority,
-                    error = %e,
-                    "TCP connect failed"
-                );
-                return response(StatusCode::BAD_GATEWAY, "bad gateway");
-            }
-        };
-
-        let on_upgrade = hyper::upgrade::on(req);
-        let source_peer_addr = self.source_peer_addr;
-
-        tokio::spawn(async move {
-            let upgraded = match on_upgrade.await {
-                Ok(u) => u,
-                Err(e) => {
+            let source_identity = match self.policy_engine.evaluate(&ctx).await {
+                PolicyDecision::Allow { source_identity } => {
+                    info!(
+                        source_identity = %source_identity,
+                        source_peer_addr = %self.source_peer_addr,
+                        dest_authority = %dest.authority,
+                        policy_decision = "allow",
+                        "CONNECT allowed"
+                    );
+                    source_identity
+                }
+                PolicyDecision::Deny {
+                    source_identity: Some(source_identity),
+                    reason,
+                } => {
                     warn!(
                         source_identity = %source_identity,
-                        source_peer_addr = %source_peer_addr,
+                        source_peer_addr = %self.source_peer_addr,
                         dest_authority = %dest.authority,
-                        error = %e,
-                        "upgrade failed"
+                        policy_decision = "deny",
+                        deny_reason = %reason,
+                        "CONNECT denied"
                     );
-                    return;
+                    return response(StatusCode::FORBIDDEN, "forbidden");
+                }
+                PolicyDecision::Deny {
+                    source_identity: None,
+                    reason,
+                } => {
+                    warn!(
+                        source_peer_addr = %self.source_peer_addr,
+                        dest_authority = %dest.authority,
+                        policy_decision = "deny",
+                        deny_reason = %reason,
+                        "CONNECT denied"
+                    );
+                    return response(StatusCode::FORBIDDEN, "forbidden");
                 }
             };
 
-            let mut downstream = hyper_util::rt::TokioIo::new(upgraded);
-
-            match copy_bidirectional(&mut downstream, &mut upstream).await {
-                Ok((up, down)) => {
-                    info!(
-                        source_identity = %source_identity,
-                        source_peer_addr = %source_peer_addr,
-                        dest_authority = %dest.authority,
-                        bytes_client_to_dest = up,
-                        bytes_dest_to_client = down,
-                        "tunnel closed"
-                    );
-                }
+            // Connect to destination BEFORE returning 200 so the client knows
+            // the tunnel is actually established.
+            let mut upstream = match TcpStream::connect((&*dest.host, dest.port)).await {
+                Ok(s) => s,
                 Err(e) => {
                     error!(
                         source_identity = %source_identity,
-                        source_peer_addr = %source_peer_addr,
+                        source_peer_addr = %self.source_peer_addr,
                         dest_authority = %dest.authority,
                         error = %e,
-                        "tunnel error"
+                        "TCP connect failed"
                     );
+                    return response(StatusCode::BAD_GATEWAY, "bad gateway");
                 }
-            }
-        });
+            };
 
-        response(StatusCode::OK, "")
+            let on_upgrade = hyper::upgrade::on(req);
+            let source_peer_addr = self.source_peer_addr;
+
+            let tunnel_span = tracing::Span::current();
+            tokio::spawn(
+                async move {
+                    let upgraded = match on_upgrade.await {
+                        Ok(u) => u,
+                        Err(e) => {
+                            warn!(
+                                source_identity = %source_identity,
+                                source_peer_addr = %source_peer_addr,
+                                dest_authority = %dest.authority,
+                                error = %e,
+                                "upgrade failed"
+                            );
+                            return;
+                        }
+                    };
+
+                    let mut downstream = hyper_util::rt::TokioIo::new(upgraded);
+
+                    match copy_bidirectional(&mut downstream, &mut upstream).await {
+                        Ok((up, down)) => {
+                            info!(
+                                source_identity = %source_identity,
+                                source_peer_addr = %source_peer_addr,
+                                dest_authority = %dest.authority,
+                                bytes_client_to_dest = up,
+                                bytes_dest_to_client = down,
+                                "tunnel closed"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                source_identity = %source_identity,
+                                source_peer_addr = %source_peer_addr,
+                                dest_authority = %dest.authority,
+                                error = %e,
+                                "tunnel error"
+                            );
+                        }
+                    }
+                }
+                .instrument(tunnel_span),
+            );
+
+            response(StatusCode::OK, "")
+        }
+        .instrument(span)
+        .await
     }
 }
 
@@ -250,5 +286,35 @@ impl Destination {
             port,
             authority: authority_str,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opentelemetry::trace::TraceContextExt;
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+
+    #[test]
+    fn extracts_trace_context_from_headers() {
+        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            http::HeaderValue::from_static(
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            ),
+        );
+
+        let context = extract_trace_context(&headers);
+        let span = context.span();
+        let span_context = span.span_context();
+
+        assert!(span_context.is_valid());
+        assert_eq!(
+            span_context.trace_id().to_string(),
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
     }
 }
