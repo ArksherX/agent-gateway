@@ -17,6 +17,8 @@ use tracing::{error, info, warn};
 use crate::bridge::GatewayConnector;
 use crate::identity::{TpmClientIdentity, parse_tpm_key_handle};
 
+const DEFAULT_CLIENT_IDENTITY_EXT_OID: &str = "1.3.6.1.4.1.57264.1.1";
+
 #[derive(Parser)]
 #[command(
     name = "agent_gateway_sidecar",
@@ -34,6 +36,10 @@ struct Cli {
     /// Path to PEM client certificate (presented to the gateway)
     #[arg(long)]
     client_cert: PathBuf,
+
+    /// Client certificate extension OID that contains the source identity
+    #[arg(long, default_value = DEFAULT_CLIENT_IDENTITY_EXT_OID)]
+    client_identity_ext_oid: String,
 
     /// TCTI string for the simulated TPM
     #[arg(long, default_value = "swtpm:host=127.0.0.1,port=2321")]
@@ -71,10 +77,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let tpm_key_handle = parse_tpm_key_handle(&cli.tpm_key_handle)?;
-    let identity = TpmClientIdentity::load(&cli.tpm_tcti, tpm_key_handle, &cli.client_cert)?;
+    let identity = TpmClientIdentity::load(
+        &cli.tpm_tcti,
+        tpm_key_handle,
+        &cli.client_cert,
+        &cli.client_identity_ext_oid,
+    )?;
+    let source_identity = identity.source_identity().to_owned();
     let tls_config = build_client_config(identity, &cli.ca_cert)?;
 
     let (gateway_host, gateway_port) = parse_gateway_addr(&cli.gateway)?;
+    let gateway_endpoint = format_endpoint(&gateway_host, gateway_port);
     let gateway_sni = ServerName::try_from(gateway_host.clone())
         .context("gateway hostname is not a valid SNI value")?;
 
@@ -83,10 +96,17 @@ async fn main() -> anyhow::Result<()> {
         gateway_sni,
         gateway_host,
         gateway_port,
+        gateway_endpoint.clone(),
+        source_identity.clone(),
     ));
 
     let listener = TcpListener::bind(cli.listen).await?;
-    info!(listen = %cli.listen, gateway = %cli.gateway, "sidecar ready");
+    info!(
+        source_identity = %source_identity,
+        listen = %cli.listen,
+        gateway_endpoint = %gateway_endpoint,
+        "sidecar ready"
+    );
 
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -100,8 +120,8 @@ async fn main() -> anyhow::Result<()> {
 
         let connector = connector.clone();
         tokio::spawn(async move {
-            if let Err(e) = bridge::serve_connection(stream, connector).await {
-                error!(%peer, error = %e, "connection error");
+            if let Err(e) = bridge::serve_connection(stream, peer, connector).await {
+                error!(source_peer_addr = %peer, error = %e, "connection error");
             }
         });
     }
@@ -158,6 +178,14 @@ fn parse_gateway_addr(addr: &str) -> anyhow::Result<(String, u16)> {
     }
 }
 
+fn format_endpoint(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +209,12 @@ mod tests {
         let (host, port) = parse_gateway_addr("[::1]:8443").unwrap();
         assert_eq!(host, "::1");
         assert_eq!(port, 8443);
+    }
+
+    #[test]
+    fn format_endpoint_brackets_ipv6() {
+        assert_eq!(format_endpoint("127.0.0.1", 8443), "127.0.0.1:8443");
+        assert_eq!(format_endpoint("::1", 8443), "[::1]:8443");
     }
 
     #[test]

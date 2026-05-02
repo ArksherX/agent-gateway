@@ -216,6 +216,11 @@ impl tracing::field::Visit for CaptureVisitor {
         self.fields
             .insert(field.name().to_owned(), value.to_string());
     }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.fields
+            .insert(field.name().to_owned(), value.to_string());
+    }
 }
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
@@ -346,7 +351,7 @@ pub async fn start_proxy(pki: &TestPki, policy_config: PolicyConfig) -> (SocketA
 
     let task = tokio::spawn(async move {
         loop {
-            let (tcp, _peer) = match listener.accept().await {
+            let (tcp, peer) = match listener.accept().await {
                 Ok(c) => c,
                 Err(_) => continue,
             };
@@ -356,12 +361,16 @@ pub async fn start_proxy(pki: &TestPki, policy_config: PolicyConfig) -> (SocketA
                 let tls_stream = match acceptor.accept(tcp).await {
                     Ok(s) => s,
                     Err(e) => {
-                        tracing::error!(error = %e, "TLS handshake failed");
+                        tracing::error!(
+                            source_peer_addr = %peer,
+                            error = %e,
+                            "TLS handshake failed"
+                        );
                         return;
                     }
                 };
                 let peer_certs = agent_gateway::proxy::extract_peer_certs(tls_stream.get_ref().1);
-                let service = svc.make_service(peer_certs);
+                let service = svc.make_service(peer_certs, peer);
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
                 let _ = hyper_util::server::conn::auto::Builder::new(
                     hyper_util::rt::TokioExecutor::new(),

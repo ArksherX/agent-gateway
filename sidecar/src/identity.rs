@@ -19,6 +19,7 @@ use tss_esapi::structures::{
 };
 use tss_esapi::tcti_ldr::TctiNameConf;
 use tss_esapi::{Context, tss2_esys};
+use x509_parser::oid_registry::Oid;
 use x509_parser::prelude::*;
 
 const PERSISTENT_HANDLE_START: u32 = 0x8100_0000;
@@ -60,17 +61,23 @@ pub fn parse_tpm_key_handle(value: &str) -> anyhow::Result<u32> {
 
 pub struct TpmClientIdentity {
     cert_chain: Vec<CertificateDer<'static>>,
+    source_identity: String,
     signing_key: Arc<TpmSigningKey>,
 }
 
 impl TpmClientIdentity {
-    pub fn load(tcti: &str, key_handle: u32, cert_path: &Path) -> anyhow::Result<Self> {
+    pub fn load(
+        tcti: &str,
+        key_handle: u32,
+        cert_path: &Path,
+        identity_ext_oid: &str,
+    ) -> anyhow::Result<Self> {
         let cert_chain = load_certs(cert_path)?;
-        let leaf_spki = certificate_spki(
-            cert_chain
-                .first()
-                .context("client certificate chain must contain a leaf certificate")?,
-        )?;
+        let leaf_cert = cert_chain
+            .first()
+            .context("client certificate chain must contain a leaf certificate")?;
+        let leaf_spki = certificate_spki(leaf_cert)?;
+        let source_identity = certificate_identity(leaf_cert, identity_ext_oid)?;
 
         let signing_key = Arc::new(TpmSigningKey::load(tcti, key_handle)?);
         ensure!(
@@ -80,8 +87,13 @@ impl TpmClientIdentity {
 
         Ok(Self {
             cert_chain,
+            source_identity,
             signing_key,
         })
+    }
+
+    pub fn source_identity(&self) -> &str {
+        &self.source_identity
     }
 
     pub fn resolver(self) -> Arc<dyn ResolvesClientCert> {
@@ -251,6 +263,29 @@ fn certificate_spki(cert: &CertificateDer<'_>) -> anyhow::Result<Vec<u8>> {
     let (_, cert) =
         X509Certificate::from_der(cert.as_ref()).context("parsing client certificate")?;
     Ok(cert.tbs_certificate.subject_pki.raw.to_vec())
+}
+
+fn certificate_identity(
+    cert: &CertificateDer<'_>,
+    identity_ext_oid: &str,
+) -> anyhow::Result<String> {
+    let oid = Oid::from_str(identity_ext_oid)
+        .map_err(|e| anyhow::anyhow!("invalid client identity extension OID: {e:?}"))?;
+    let (_, cert) =
+        X509Certificate::from_der(cert.as_ref()).context("parsing client certificate")?;
+    let ext = cert
+        .tbs_certificate
+        .extensions()
+        .iter()
+        .find(|ext| ext.oid == oid)
+        .with_context(|| format!("missing client identity extension {identity_ext_oid}"))?;
+    let (remaining, value) = x509_parser::asn1_rs::Utf8String::from_der(ext.value)
+        .context("decoding client identity extension as UTF8String")?;
+    ensure!(
+        remaining.is_empty(),
+        "client identity extension contains trailing bytes"
+    );
+    Ok(value.string().to_owned())
 }
 
 fn p256_spki_from_tpm_public(public: &Public) -> anyhow::Result<Vec<u8>> {

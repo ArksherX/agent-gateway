@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -23,16 +24,19 @@ type ProxyBody = BoxBody<Bytes, Infallible>;
 pub struct ProxyService {
     policy_engine: Arc<dyn PolicyEngine>,
     peer_certs: Vec<CertificateDer<'static>>,
+    source_peer_addr: SocketAddr,
 }
 
 impl ProxyService {
     pub fn new(
         policy_engine: Arc<dyn PolicyEngine>,
         peer_certs: Vec<CertificateDer<'static>>,
+        source_peer_addr: SocketAddr,
     ) -> Self {
         Self {
             policy_engine,
             peer_certs,
+            source_peer_addr,
         }
     }
 
@@ -51,33 +55,76 @@ impl ProxyService {
             destination: dest.authority.clone(),
         };
 
-        match self.policy_engine.evaluate(&ctx).await {
-            PolicyDecision::Allow => {
-                info!(dest = %dest.authority, "CONNECT allowed");
+        let source_identity = match self.policy_engine.evaluate(&ctx).await {
+            PolicyDecision::Allow { source_identity } => {
+                info!(
+                    source_identity = %source_identity,
+                    source_peer_addr = %self.source_peer_addr,
+                    dest_authority = %dest.authority,
+                    policy_decision = "allow",
+                    "CONNECT allowed"
+                );
+                source_identity
             }
-            PolicyDecision::Deny { reason } => {
-                warn!(dest = %dest.authority, %reason, "CONNECT denied");
+            PolicyDecision::Deny {
+                source_identity: Some(source_identity),
+                reason,
+            } => {
+                warn!(
+                    source_identity = %source_identity,
+                    source_peer_addr = %self.source_peer_addr,
+                    dest_authority = %dest.authority,
+                    policy_decision = "deny",
+                    deny_reason = %reason,
+                    "CONNECT denied"
+                );
                 return response(StatusCode::FORBIDDEN, "forbidden");
             }
-        }
+            PolicyDecision::Deny {
+                source_identity: None,
+                reason,
+            } => {
+                warn!(
+                    source_peer_addr = %self.source_peer_addr,
+                    dest_authority = %dest.authority,
+                    policy_decision = "deny",
+                    deny_reason = %reason,
+                    "CONNECT denied"
+                );
+                return response(StatusCode::FORBIDDEN, "forbidden");
+            }
+        };
 
         // Connect to destination BEFORE returning 200 so the client knows
         // the tunnel is actually established.
         let mut upstream = match TcpStream::connect((&*dest.host, dest.port)).await {
             Ok(s) => s,
             Err(e) => {
-                error!(dest = %dest.authority, error = %e, "TCP connect failed");
+                error!(
+                    source_identity = %source_identity,
+                    source_peer_addr = %self.source_peer_addr,
+                    dest_authority = %dest.authority,
+                    error = %e,
+                    "TCP connect failed"
+                );
                 return response(StatusCode::BAD_GATEWAY, "bad gateway");
             }
         };
 
         let on_upgrade = hyper::upgrade::on(req);
+        let source_peer_addr = self.source_peer_addr;
 
         tokio::spawn(async move {
             let upgraded = match on_upgrade.await {
                 Ok(u) => u,
                 Err(e) => {
-                    warn!(dest = %dest.authority, error = %e, "upgrade failed");
+                    warn!(
+                        source_identity = %source_identity,
+                        source_peer_addr = %source_peer_addr,
+                        dest_authority = %dest.authority,
+                        error = %e,
+                        "upgrade failed"
+                    );
                     return;
                 }
             };
@@ -87,14 +134,22 @@ impl ProxyService {
             match copy_bidirectional(&mut downstream, &mut upstream).await {
                 Ok((up, down)) => {
                     info!(
-                        dest = %dest.authority,
-                        client_to_dest = up,
-                        dest_to_client = down,
+                        source_identity = %source_identity,
+                        source_peer_addr = %source_peer_addr,
+                        dest_authority = %dest.authority,
+                        bytes_client_to_dest = up,
+                        bytes_dest_to_client = down,
                         "tunnel closed"
                     );
                 }
                 Err(e) => {
-                    error!(dest = %dest.authority, error = %e, "tunnel error");
+                    error!(
+                        source_identity = %source_identity,
+                        source_peer_addr = %source_peer_addr,
+                        dest_authority = %dest.authority,
+                        error = %e,
+                        "tunnel error"
+                    );
                 }
             }
         });
@@ -123,8 +178,12 @@ impl MakeProxyService {
         Self { policy_engine }
     }
 
-    pub fn make_service(&self, peer_certs: Vec<CertificateDer<'static>>) -> ProxyService {
-        ProxyService::new(self.policy_engine.clone(), peer_certs)
+    pub fn make_service(
+        &self,
+        peer_certs: Vec<CertificateDer<'static>>,
+        source_peer_addr: SocketAddr,
+    ) -> ProxyService {
+        ProxyService::new(self.policy_engine.clone(), peer_certs, source_peer_addr)
     }
 }
 

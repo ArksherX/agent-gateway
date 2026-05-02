@@ -83,13 +83,13 @@ async fn serve_loop(
             let tls_stream = match acceptor.accept(tcp_stream).await {
                 Ok(s) => s,
                 Err(e) => {
-                    error!(%peer_addr, error = %e, "TLS handshake failed");
+                    error!(source_peer_addr = %peer_addr, error = %e, "TLS handshake failed");
                     return;
                 }
             };
 
             let peer_certs = proxy::extract_peer_certs(tls_stream.get_ref().1);
-            let service = make_svc.make_service(peer_certs);
+            let service = make_svc.make_service(peer_certs, peer_addr);
 
             let io = hyper_util::rt::TokioIo::new(tls_stream);
             if let Err(e) = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
@@ -97,7 +97,7 @@ async fn serve_loop(
                 .serve_connection_with_upgrades(io, service)
                 .await
             {
-                error!(%peer_addr, error = %e, "connection error");
+                error!(source_peer_addr = %peer_addr, error = %e, "connection error");
             }
         });
     }

@@ -25,6 +25,32 @@ fn policy_allowing(destinations: Vec<String>) -> PolicyConfig {
     }
 }
 
+fn assert_field_eq(event: &common::CapturedEvent, field: &str, expected: &str) {
+    assert_eq!(
+        event.fields.get(field).map(String::as_str),
+        Some(expected),
+        "{field} should match"
+    );
+}
+
+fn assert_field_present(event: &common::CapturedEvent, field: &str) {
+    assert!(
+        event.fields.get(field).is_some(),
+        "{field} should be present"
+    );
+}
+
+fn assert_source_peer_addr(event: &common::CapturedEvent) {
+    let source_peer_addr = event
+        .fields
+        .get("source_peer_addr")
+        .expect("source_peer_addr should be present");
+    assert!(
+        source_peer_addr.starts_with("127.0.0.1:"),
+        "source_peer_addr should be a loopback socket address, got {source_peer_addr}"
+    );
+}
+
 #[tokio::test]
 async fn tunnel_echoes_data() {
     let _guard = serial_test_lock();
@@ -61,32 +87,29 @@ async fn tunnel_echoes_data() {
 
     let allowed_evt =
         find_event(&events, "CONNECT allowed").expect("expected CONNECT allowed event");
-    assert_eq!(
-        allowed_evt.fields.get("dest").map(String::as_str),
-        Some(&*dest),
-        "CONNECT allowed dest should match requested destination"
-    );
+    assert_field_eq(allowed_evt, "source_identity", EXT_VALUE);
+    assert_source_peer_addr(allowed_evt);
+    assert_field_eq(allowed_evt, "dest_authority", &dest);
+    assert_field_eq(allowed_evt, "policy_decision", "allow");
 
     let closed_evt = find_event(&events, "tunnel closed").expect("expected tunnel closed event");
-    assert_eq!(
-        closed_evt.fields.get("dest").map(String::as_str),
-        Some(&*dest),
-        "tunnel closed dest should match requested destination"
-    );
+    assert_field_eq(closed_evt, "source_identity", EXT_VALUE);
+    assert_source_peer_addr(closed_evt);
+    assert_field_eq(closed_evt, "dest_authority", &dest);
     let c2d: u64 = closed_evt
         .fields
-        .get("client_to_dest")
-        .expect("tunnel closed should have client_to_dest")
+        .get("bytes_client_to_dest")
+        .expect("tunnel closed should have bytes_client_to_dest")
         .parse()
         .unwrap();
     let d2c: u64 = closed_evt
         .fields
-        .get("dest_to_client")
-        .expect("tunnel closed should have dest_to_client")
+        .get("bytes_dest_to_client")
+        .expect("tunnel closed should have bytes_dest_to_client")
         .parse()
         .unwrap();
-    assert!(c2d > 0, "client_to_dest should be > 0, got {c2d}");
-    assert!(d2c > 0, "dest_to_client should be > 0, got {d2c}");
+    assert!(c2d > 0, "bytes_client_to_dest should be > 0, got {c2d}");
+    assert!(d2c > 0, "bytes_dest_to_client should be > 0, got {d2c}");
 }
 
 #[tokio::test]
@@ -114,15 +137,11 @@ async fn tunnel_policy_deny() {
 
     let events = wait_for_event(&log, "CONNECT denied", EVENT_TIMEOUT).await;
     let denied_evt = find_event(&events, "CONNECT denied").expect("expected CONNECT denied event");
-    assert!(
-        denied_evt.fields.get("reason").is_some(),
-        "CONNECT denied event should have reason field"
-    );
-    assert_eq!(
-        denied_evt.fields.get("dest").map(String::as_str),
-        Some("127.0.0.1:9999"),
-        "CONNECT denied dest should match requested destination"
-    );
+    assert_field_eq(denied_evt, "source_identity", EXT_VALUE);
+    assert_source_peer_addr(denied_evt);
+    assert_field_eq(denied_evt, "dest_authority", "127.0.0.1:9999");
+    assert_field_eq(denied_evt, "policy_decision", "deny");
+    assert_field_present(denied_evt, "deny_reason");
 }
 
 #[tokio::test]
@@ -154,10 +173,10 @@ async fn tunnel_unreachable_destination() {
     let events = wait_for_event(&log, "TCP connect failed", EVENT_TIMEOUT).await;
     let tcp_fail =
         find_event(&events, "TCP connect failed").expect("expected TCP connect failed event");
-    assert!(
-        tcp_fail.fields.get("error").is_some(),
-        "TCP connect failed event should have error field"
-    );
+    assert_field_eq(tcp_fail, "source_identity", EXT_VALUE);
+    assert_source_peer_addr(tcp_fail);
+    assert_field_eq(tcp_fail, "dest_authority", &dest);
+    assert_field_present(tcp_fail, "error");
 }
 
 #[tokio::test]
@@ -229,7 +248,14 @@ async fn tunnel_wrong_extension_denied() {
 
     let events = wait_for_event(&log, "CONNECT denied", EVENT_TIMEOUT).await;
     let denied = find_event(&events, "CONNECT denied").expect("expected CONNECT denied event");
-    let reason = denied.fields.get("reason").expect("should have reason");
+    assert_field_eq(denied, "source_identity", "agent-beta");
+    assert_source_peer_addr(denied);
+    assert_field_eq(denied, "dest_authority", &dest);
+    assert_field_eq(denied, "policy_decision", "deny");
+    let reason = denied
+        .fields
+        .get("deny_reason")
+        .expect("should have reason");
     assert!(
         reason.contains("agent-beta"),
         "denial reason should mention the unrecognized extension value; got: {reason}"
@@ -272,7 +298,17 @@ async fn tunnel_missing_extension_denied() {
 
     let events = wait_for_event(&log, "CONNECT denied", EVENT_TIMEOUT).await;
     let denied = find_event(&events, "CONNECT denied").expect("expected CONNECT denied event");
-    let reason = denied.fields.get("reason").expect("should have reason");
+    assert!(
+        !denied.fields.contains_key("source_identity"),
+        "source_identity should be omitted when the client cert has no identity extension"
+    );
+    assert_source_peer_addr(denied);
+    assert_field_eq(denied, "dest_authority", &dest);
+    assert_field_eq(denied, "policy_decision", "deny");
+    let reason = denied
+        .fields
+        .get("deny_reason")
+        .expect("should have reason");
     assert!(
         reason.contains("missing required extension"),
         "denial reason should mention missing extension; got: {reason}"
@@ -310,9 +346,12 @@ async fn mtls_no_client_cert_rejected() {
 
     // Server should log the TLS handshake failure, and never reach policy evaluation
     let events = wait_for_event(&log, "TLS handshake failed", EVENT_TIMEOUT).await;
+    let handshake_failed = find_event(&events, "TLS handshake failed")
+        .expect("server should log TLS handshake failure");
+    assert_source_peer_addr(handshake_failed);
     assert!(
-        find_event(&events, "TLS handshake failed").is_some(),
-        "server should log TLS handshake failure; got: {events:?}"
+        !handshake_failed.fields.contains_key("source_identity"),
+        "source_identity should be omitted before client identity is authenticated"
     );
     assert!(
         find_event(&events, "CONNECT allowed").is_none(),
@@ -360,9 +399,12 @@ async fn mtls_untrusted_ca_rejected() {
 
     // Server should log the TLS handshake failure, and never reach policy evaluation
     let events = wait_for_event(&log, "TLS handshake failed", EVENT_TIMEOUT).await;
+    let handshake_failed = find_event(&events, "TLS handshake failed")
+        .expect("server should log TLS handshake failure");
+    assert_source_peer_addr(handshake_failed);
     assert!(
-        find_event(&events, "TLS handshake failed").is_some(),
-        "server should log TLS handshake failure; got: {events:?}"
+        !handshake_failed.fields.contains_key("source_identity"),
+        "source_identity should be omitted before client identity is authenticated"
     );
     assert!(
         find_event(&events, "CONNECT allowed").is_none(),

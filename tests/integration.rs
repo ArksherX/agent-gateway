@@ -42,13 +42,13 @@ async fn eval(engine: &TomlPolicyEngine, pki: &TestPki, dest: &str) -> PolicyDec
 }
 
 fn assert_allow(decision: PolicyDecision) {
-    if let PolicyDecision::Deny { reason } = decision {
+    if let PolicyDecision::Deny { reason, .. } = decision {
         panic!("expected Allow, got Deny: {reason}");
     }
 }
 
 fn assert_deny(decision: PolicyDecision) {
-    if let PolicyDecision::Allow = decision {
+    if let PolicyDecision::Allow { .. } = decision {
         panic!("expected Deny, got Allow");
     }
 }
@@ -188,7 +188,12 @@ async fn policy_allows_explicit_non_default_port() {
 async fn policy_denies_wrong_destination() {
     let pki = TestPki::new("agent-alpha");
     let engine = TomlPolicyEngine::new(test_policy_config()).unwrap();
-    assert_deny(eval(&engine, &pki, "evil.example.com:443").await);
+    match eval(&engine, &pki, "evil.example.com:443").await {
+        PolicyDecision::Deny {
+            source_identity, ..
+        } => assert_eq!(source_identity.as_deref(), Some("agent-alpha")),
+        PolicyDecision::Allow { .. } => panic!("expected Deny"),
+    }
 }
 
 #[tokio::test]
@@ -202,7 +207,12 @@ async fn policy_denies_wrong_port() {
 async fn policy_denies_unknown_extension_value() {
     let pki = TestPki::new("agent-unknown");
     let engine = TomlPolicyEngine::new(test_policy_config()).unwrap();
-    assert_deny(eval(&engine, &pki, "api.example.com:443").await);
+    match eval(&engine, &pki, "api.example.com:443").await {
+        PolicyDecision::Deny {
+            source_identity, ..
+        } => assert_eq!(source_identity.as_deref(), Some("agent-unknown")),
+        PolicyDecision::Allow { .. } => panic!("expected Deny"),
+    }
 }
 
 #[tokio::test]
@@ -212,7 +222,12 @@ async fn policy_denies_no_cert() {
         peer_certificates: vec![],
         destination: "api.example.com:443".into(),
     };
-    assert_deny(engine.evaluate(&ctx).await);
+    match engine.evaluate(&ctx).await {
+        PolicyDecision::Deny {
+            source_identity, ..
+        } => assert!(source_identity.is_none()),
+        PolicyDecision::Allow { .. } => panic!("expected Deny"),
+    }
 }
 
 // ---- Default port (443) ----

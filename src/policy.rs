@@ -14,8 +14,13 @@ pub struct RequestContext {
 }
 
 pub enum PolicyDecision {
-    Allow,
-    Deny { reason: String },
+    Allow {
+        source_identity: String,
+    },
+    Deny {
+        source_identity: Option<String>,
+        reason: String,
+    },
 }
 
 #[async_trait]
@@ -126,6 +131,7 @@ impl PolicyEngine for TomlPolicyEngine {
         // remaining entries are intermediates used for chain-of-trust validation.
         let Some(peer_cert_der) = ctx.peer_certificates.first() else {
             return PolicyDecision::Deny {
+                source_identity: None,
                 reason: "no client certificate".into(),
             };
         };
@@ -134,6 +140,7 @@ impl PolicyEngine for TomlPolicyEngine {
             Ok((_, cert)) => cert,
             Err(e) => {
                 return PolicyDecision::Deny {
+                    source_identity: None,
                     reason: format!("failed to parse client certificate: {e}"),
                 };
             }
@@ -146,6 +153,7 @@ impl PolicyEngine for TomlPolicyEngine {
             .find(|e| e.oid == self.client_ext_oid)
         else {
             return PolicyDecision::Deny {
+                source_identity: None,
                 reason: format!("missing required extension {}", self.client_ext_oid),
             };
         };
@@ -154,6 +162,7 @@ impl PolicyEngine for TomlPolicyEngine {
             Ok((remaining, v)) => {
                 if !remaining.is_empty() {
                     return PolicyDecision::Deny {
+                        source_identity: None,
                         reason: "extension value contains trailing bytes".into(),
                     };
                 }
@@ -161,6 +170,7 @@ impl PolicyEngine for TomlPolicyEngine {
             }
             Err(e) => {
                 return PolicyDecision::Deny {
+                    source_identity: None,
                     reason: format!("failed to decode extension as UTF8String: {e}"),
                 };
             }
@@ -168,6 +178,7 @@ impl PolicyEngine for TomlPolicyEngine {
 
         let Some(allowed) = self.rules.get(&ext_value) else {
             return PolicyDecision::Deny {
+                source_identity: Some(ext_value.to_owned()),
                 reason: format!("no rules for extension value {ext_value:?}"),
             };
         };
@@ -176,14 +187,18 @@ impl PolicyEngine for TomlPolicyEngine {
             Ok(d) => d,
             Err(e) => {
                 return PolicyDecision::Deny {
+                    source_identity: Some(ext_value.to_owned()),
                     reason: format!("invalid destination: {e}"),
                 };
             }
         };
         if allowed.contains(&normalized_dest) {
-            PolicyDecision::Allow
+            PolicyDecision::Allow {
+                source_identity: ext_value.to_owned(),
+            }
         } else {
             PolicyDecision::Deny {
+                source_identity: Some(ext_value.to_owned()),
                 reason: format!(
                     "destination {:?} not allowed for {:?}",
                     ctx.destination, ext_value
