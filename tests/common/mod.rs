@@ -13,7 +13,6 @@ use rcgen::{
 };
 use rustls::server::WebPkiClientVerifier;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -368,22 +367,20 @@ impl TestAuthzRegistry {
             .expect("encode verifying key")
             .as_bytes()
             .to_vec();
-        let pubkey_sha256 = Sha256::digest(&public_key_spki_der).to_vec();
         let key_id = unique_id("test-key");
         let (not_before, not_after) = active_window();
 
         sqlx::query(
             r#"
             INSERT INTO principal_signing_keys (
-                key_id, algorithm, public_key_spki_der, pubkey_sha256,
+                key_id, algorithm, public_key_spki_der,
                 not_before, not_after
             )
-            VALUES ($1, 'ecdsa_p256_sha256', $2, $3, $4, $5)
+            VALUES ($1, 'ecdsa_p256_sha256', $2, $3, $4)
             "#,
         )
         .bind(&key_id)
         .bind(&public_key_spki_der)
-        .bind(&pubkey_sha256)
         .bind(not_before)
         .bind(not_after)
         .execute(&pool)

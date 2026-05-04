@@ -34,46 +34,40 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 public_der="$tmpdir/public.der"
-pubkey_hash="$tmpdir/pubkey.sha256"
 openssl ec -in "$PRIVATE_KEY" -pubout -outform DER -out "$public_der" 2>/dev/null
-openssl dgst -sha256 -binary "$public_der" > "$pubkey_hash"
 
 hex_file() {
   od -An -tx1 -v "$1" | tr -d ' \n'
 }
 
 PUBLIC_KEY_HEX="$(hex_file "$public_der")"
-PUBKEY_SHA256_HEX="$(hex_file "$pubkey_hash")"
 
 psql "$DATABASE_URL" \
   --set=ON_ERROR_STOP=1 \
   --set=key_id="$KEY_ID" \
   --set=public_key_spki_der="$PUBLIC_KEY_HEX" \
-  --set=pubkey_sha256="$PUBKEY_SHA256_HEX" \
   --set=valid_days="$VALID_DAYS" <<'SQL'
 WITH input AS (
   SELECT
     :'key_id'::text AS key_id,
     decode(:'public_key_spki_der', 'hex') AS public_key_spki_der,
-    decode(:'pubkey_sha256', 'hex') AS pubkey_sha256,
     :'valid_days'::int AS valid_days
 )
 INSERT INTO principal_signing_keys (
-  key_id, algorithm, public_key_spki_der, pubkey_sha256,
+  key_id, algorithm, public_key_spki_der,
   not_before, not_after, revoked_at
 )
 SELECT
-  key_id, 'ecdsa_p256_sha256', public_key_spki_der, pubkey_sha256,
+  key_id, 'ecdsa_p256_sha256', public_key_spki_der,
   now(), now() + make_interval(days => valid_days), NULL
 FROM input
 ON CONFLICT (key_id) DO UPDATE SET
   public_key_spki_der = EXCLUDED.public_key_spki_der,
-  pubkey_sha256 = EXCLUDED.pubkey_sha256,
   not_before = now(),
   not_after = EXCLUDED.not_after,
   revoked_at = NULL,
   updated_at = now()
-RETURNING key_id, encode(pubkey_sha256, 'hex') AS pubkey_sha256, not_after;
+RETURNING key_id, not_after;
 SQL
 
 echo "Private key: $PRIVATE_KEY"

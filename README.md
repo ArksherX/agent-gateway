@@ -127,7 +127,7 @@ The authorization registry has three main tables:
 
 | Table | Key Columns | Purpose |
 |---|---|---|
-| `principal_signing_keys` | `key_id`, `algorithm`, `public_key_spki_der`, `pubkey_sha256`, `not_before`, `not_after`, `revoked_at` | Stores trusted P-256 public keys that may sign permissions. |
+| `principal_signing_keys` | `key_id`, `algorithm`, `public_key_spki_der`, `not_before`, `not_after`, `revoked_at` | Stores trusted P-256 public keys that may sign permissions. |
 | `principal_key_permissions` | `signing_key_id`, `subject_identity`, `destination`, `not_before`, `not_after`, `revoked_at` | Defines what each signing key is allowed to delegate. |
 | `permission_registry` | `permission_id`, `signing_key_id`, `subject_identity`, `destination`, `not_before`, `not_after`, `revoked_at`, `signature` | Stores signed permissions that authorize a subject identity to reach a normalized destination. |
 

@@ -8,8 +8,7 @@ INSERT INTO agent_gateway_schema_version (version) VALUES (1);
 CREATE TABLE principal_signing_keys (
     key_id TEXT PRIMARY KEY,
     algorithm TEXT NOT NULL CHECK (algorithm = 'ecdsa_p256_sha256'),
-    public_key_spki_der BYTEA NOT NULL,
-    pubkey_sha256 BYTEA NOT NULL UNIQUE CHECK (length(pubkey_sha256) = 32),
+    public_key_spki_der BYTEA NOT NULL UNIQUE,
     not_before TIMESTAMPTZ NOT NULL,
     not_after TIMESTAMPTZ NOT NULL,
     revoked_at TIMESTAMPTZ,
