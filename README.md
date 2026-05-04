@@ -103,13 +103,13 @@ Gateway startup verifies the authorization registry schema version and fails fas
 
 Shut down cleanly with `Ctrl-C`.
 
-Register a demo principal signing key with:
+Register a principal signing key from the TPM owner machine with:
 
 ```bash
 ./examples/register-principal-key.sh org-alice
 ```
 
-The script creates a P-256 private key under `certs/principals/`, stores the public key in `principal_signing_keys`, and uses the friendly `key_id` (`org-alice`, `org-bob`, etc.) for the registry row.
+The script creates or reuses a non-exportable TPM-backed P-256 key through `tpm2_ptool` and PKCS#11, stores only the public key in `principal_signing_keys`, and uses the friendly `key_id` (`org-alice`, `org-bob`, etc.) for the registry row. Run it on the machine that owns the TPM, with `AGENT_GATEWAY_DATABASE_URL` or `DATABASE_URL` pointing at Postgres.
 
 ## Authorization Registry
 
