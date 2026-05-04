@@ -21,7 +21,6 @@ CREATE TABLE principal_signing_keys (
 CREATE TABLE principal_key_permissions (
     id BIGSERIAL PRIMARY KEY,
     signing_key_id TEXT NOT NULL REFERENCES principal_signing_keys(key_id),
-    subject_identity TEXT NOT NULL CHECK (subject_identity <> ''),
     destination TEXT NOT NULL CHECK (destination <> ''),
     not_before TIMESTAMPTZ NOT NULL,
     not_after TIMESTAMPTZ NOT NULL,
@@ -51,5 +50,5 @@ CREATE INDEX permission_registry_active_lookup_idx
     WHERE revoked_at IS NULL;
 
 CREATE INDEX principal_key_permissions_active_scope_idx
-    ON principal_key_permissions (signing_key_id, subject_identity, destination)
+    ON principal_key_permissions (signing_key_id, destination)
     WHERE revoked_at IS NULL;

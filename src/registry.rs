@@ -109,7 +109,6 @@ impl RegistryStore {
     pub async fn signer_has_scope(
         &self,
         signing_key_id: &str,
-        subject_identity: &str,
         destination: &str,
         permission_not_before: DateTime<Utc>,
         permission_not_after: DateTime<Utc>,
@@ -120,18 +119,16 @@ impl RegistryStore {
                 SELECT 1
                 FROM principal_key_permissions
                 WHERE signing_key_id = $1
-                  AND subject_identity = $2
-                  AND destination = $3
+                  AND destination = $2
                   AND revoked_at IS NULL
                   AND not_before <= now()
                   AND not_after > now()
-                  AND not_before <= $4
-                  AND not_after >= $5
+                  AND not_before <= $3
+                  AND not_after >= $4
             )
             "#,
         )
         .bind(signing_key_id)
-        .bind(subject_identity)
         .bind(destination)
         .bind(permission_not_before)
         .bind(permission_not_after);

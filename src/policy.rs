@@ -151,10 +151,7 @@ impl PolicyEngine for PostgresPolicyEngine {
 
         let mut last_denial = None;
         for candidate in candidates {
-            match self
-                .evaluate_candidate(&candidate, &source_identity, &normalized_dest)
-                .await
-            {
+            match self.evaluate_candidate(&candidate, &normalized_dest).await {
                 Ok(()) => return PolicyDecision::Allow { source_identity },
                 Err(reason) => last_denial = Some(reason),
             }
@@ -176,7 +173,6 @@ impl PostgresPolicyEngine {
     async fn evaluate_candidate(
         &self,
         candidate: &CandidatePermission,
-        source_identity: &str,
         normalized_dest: &str,
     ) -> Result<(), String> {
         if !candidate.signer_active_now {
@@ -200,7 +196,6 @@ impl PostgresPolicyEngine {
             .registry
             .signer_has_scope(
                 &candidate.signing_key_id,
-                source_identity,
                 normalized_dest,
                 candidate.permission_not_before,
                 candidate.permission_not_after,
@@ -209,8 +204,8 @@ impl PostgresPolicyEngine {
             .map_err(|e| format!("signer scope lookup failed: {e:#}"))?;
         if !has_scope {
             return Err(format!(
-                "signing key {:?} is not allowed to delegate {:?} to {:?}",
-                candidate.signing_key_id, normalized_dest, source_identity
+                "signing key {:?} is not allowed to delegate {:?}",
+                candidate.signing_key_id, normalized_dest
             ));
         }
 

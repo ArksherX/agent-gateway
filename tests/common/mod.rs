@@ -472,13 +472,12 @@ impl TestAuthzRegistry {
             sqlx::query(
                 r#"
                 INSERT INTO principal_key_permissions (
-                    signing_key_id, subject_identity, destination, not_before, not_after
+                    signing_key_id, destination, not_before, not_after
                 )
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, $4)
                 "#,
             )
             .bind(&self.key_id)
-            .bind(subject_identity)
             .bind(&normalized_destination)
             .bind(not_before)
             .bind(not_after)

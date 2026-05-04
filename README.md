@@ -119,7 +119,7 @@ The gateway authorizes a CONNECT only when all of these checks pass:
 2. The requested authority normalizes to a `host:port` destination.
 3. Postgres contains an active `permission_registry` row for that identity and destination.
 4. The row's `signature` verifies over the canonical permission row fields with the referenced active principal signing key.
-5. `principal_key_permissions` confirms that the signing key was allowed to delegate that identity/destination scope.
+5. `principal_key_permissions` confirms that the signing key was allowed to delegate that destination.
 
 ### Database Structure
 
@@ -128,10 +128,10 @@ The authorization registry has three main tables:
 | Table | Key Columns | Purpose |
 |---|---|---|
 | `principal_signing_keys` | `key_id`, `algorithm`, `public_key_spki_der`, `not_before`, `not_after`, `revoked_at` | Stores trusted P-256 public keys that may sign permissions. |
-| `principal_key_permissions` | `signing_key_id`, `subject_identity`, `destination`, `not_before`, `not_after`, `revoked_at` | Defines what each signing key is allowed to delegate. |
+| `principal_key_permissions` | `signing_key_id`, `destination`, `not_before`, `not_after`, `revoked_at` | Defines which destinations each signing key is allowed to delegate. |
 | `permission_registry` | `permission_id`, `signing_key_id`, `subject_identity`, `destination`, `not_before`, `not_after`, `revoked_at`, `signature` | Stores signed permissions that authorize a subject identity to reach a normalized destination. |
 
-`principal_key_permissions.signing_key_id` and `permission_registry.signing_key_id` both reference `principal_signing_keys.key_id`. A permission is usable only when the permission row is active, the signing key is active, the signature verifies over the canonical row fields, and the signing key has a matching delegation scope row.
+`principal_key_permissions.signing_key_id` and `permission_registry.signing_key_id` both reference `principal_signing_keys.key_id`. A permission is usable only when the permission row is active, the signing key is active, the signature verifies over the canonical row fields, and the signing key has a matching destination delegation row.
 
 The signed bytes are the following UTF-8 text, with fields in this exact order and timestamps formatted as UTC RFC 3339 with six fractional digits:
 
