@@ -2,18 +2,21 @@ mod config;
 mod observability;
 mod policy;
 mod proxy;
+mod registry;
 mod tls;
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use hyper_util::rt::TokioExecutor;
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
-use crate::policy::TomlPolicyEngine;
+use crate::policy::PostgresPolicyEngine;
 use crate::proxy::MakeProxyService;
 
 #[derive(Parser)]
@@ -22,6 +25,15 @@ struct Cli {
     /// Path to the TOML configuration file
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
+
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+}
+
+#[derive(Clone, Copy, Subcommand)]
+enum CliCommand {
+    /// Run authorization registry database migrations and exit
+    Migrate,
 }
 
 #[tokio::main]
@@ -34,13 +46,25 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::load(&cli.config)
         .with_context(|| format!("loading config from {}", cli.config.display()))?;
 
+    match cli.command {
+        None => serve(config).await,
+        Some(CliCommand::Migrate) => migrate(config).await,
+    }
+}
+
+async fn serve(config: config::Config) -> anyhow::Result<()> {
     observability::init(&config.observability)?;
 
     let server_tls = tls::build_server_config(&config.server)?;
     let tls_acceptor = tls::TlsAcceptor::from(server_tls);
 
-    let policy_engine: Arc<dyn policy::PolicyEngine> =
-        Arc::new(TomlPolicyEngine::new(config.policy)?);
+    let db_pool = build_pg_pool(&config.policy).await?;
+    registry::RegistryStore::verify_schema_version(&db_pool).await?;
+    let registry = registry::RegistryStore::new(db_pool, config.policy.query_timeout());
+    let policy_engine: Arc<dyn policy::PolicyEngine> = Arc::new(PostgresPolicyEngine::new(
+        &config.policy.client_ext_oid,
+        registry,
+    )?);
 
     let make_service = Arc::new(MakeProxyService::new(policy_engine));
 
@@ -59,6 +83,28 @@ async fn main() -> anyhow::Result<()> {
 
     observability::shutdown();
     Ok(())
+}
+
+async fn migrate(config: config::Config) -> anyhow::Result<()> {
+    let db_pool = build_pg_pool(&config.policy).await?;
+    registry::RegistryStore::run_migrations(&db_pool).await?;
+    Ok(())
+}
+
+async fn build_pg_pool(policy: &config::PolicyConfig) -> anyhow::Result<PgPool> {
+    let database_url = policy.database_url()?;
+    let connect_options = PgConnectOptions::from_str(&database_url)
+        .context("parsing authorization registry database URL")?;
+
+    let connect = PgPoolOptions::new()
+        .max_connections(policy.max_connections())
+        .acquire_timeout(policy.pool_acquire_timeout())
+        .connect_with(connect_options);
+
+    tokio::time::timeout(policy.connect_timeout(), connect)
+        .await
+        .context("authorization registry database connect timed out")?
+        .context("connecting to authorization registry database")
 }
 
 async fn serve_loop(

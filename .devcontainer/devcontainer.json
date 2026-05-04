@@ -1,12 +1,18 @@
 {
   "name": "agent-gateway",
-  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
-  "runArgs": [
-    "--userns=keep-id"
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/agent_gateway",
+  "runServices": [
+    "app",
+    "postgres"
   ],
+  "shutdownAction": "stopCompose",
   "containerUser": "vscode",
   "updateRemoteUserUID": false,
   "containerEnv": {
-    "HOME": "/home/vscode"
+    "HOME": "/home/vscode",
+    "AGENT_GATEWAY_DATABASE_URL": "postgres://agent_gateway_admin:agent_gateway_dev@postgres:5432/agent_gateway",
+    "TEST_DATABASE_URL": "postgres://agent_gateway_admin:agent_gateway_dev@postgres:5432/agent_gateway"
   }
 }

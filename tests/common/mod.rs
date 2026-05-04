@@ -1,20 +1,29 @@
+#![allow(dead_code)]
+
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use p256::ecdsa::{SigningKey, signature::Signer};
+use p256::pkcs8::EncodePublicKey;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, CustomExtension, DistinguishedName,
     DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
 };
 use rustls::server::WebPkiClientVerifier;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use sha2::{Digest, Sha256};
+use sqlx::postgres::PgPoolOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use agent_gateway::config::PolicyConfig;
-use agent_gateway::policy::TomlPolicyEngine;
+use agent_gateway::policy::{PolicyEngine, PostgresPolicyEngine};
 use agent_gateway::proxy::MakeProxyService;
+use agent_gateway::registry::RegistryStore;
 
 const CLIENT_EXTENSION_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 57264, 1, 1];
+static TEST_ID: AtomicU64 = AtomicU64::new(1);
 
 // ---------------------------------------------------------------------------
 // PKI generation
@@ -308,6 +317,282 @@ pub fn serial_test_lock() -> std::sync::MutexGuard<'static, ()> {
     E2E_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+pub fn install_test_crypto_provider() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .ok();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Postgres authorization registry helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct TestAuthzRegistry {
+    pub pool: sqlx::PgPool,
+    pub store: RegistryStore,
+    signing_key: SigningKey,
+    key_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SeededPermission {
+    pub permission_id: String,
+    pub normalized_destination: String,
+}
+
+impl TestAuthzRegistry {
+    pub async fn new() -> Self {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("connect to TEST_DATABASE_URL");
+
+        RegistryStore::run_migrations(&pool)
+            .await
+            .expect("run registry migrations");
+        RegistryStore::verify_schema_version(&pool)
+            .await
+            .expect("verify registry schema");
+
+        let signing_key = test_signing_key();
+        let public_key_spki_der = signing_key
+            .verifying_key()
+            .to_public_key_der()
+            .expect("encode verifying key")
+            .as_bytes()
+            .to_vec();
+        let pubkey_sha256 = Sha256::digest(&public_key_spki_der).to_vec();
+        let key_id = unique_id("test-key");
+        let (not_before, not_after) = active_window();
+
+        sqlx::query(
+            r#"
+            INSERT INTO principal_signing_keys (
+                key_id, algorithm, public_key_spki_der, pubkey_sha256,
+                not_before, not_after
+            )
+            VALUES ($1, 'ecdsa_p256_sha256', $2, $3, $4, $5)
+            "#,
+        )
+        .bind(&key_id)
+        .bind(&public_key_spki_der)
+        .bind(&pubkey_sha256)
+        .bind(not_before)
+        .bind(not_after)
+        .execute(&pool)
+        .await
+        .expect("insert test signing key");
+
+        let store = RegistryStore::new(pool.clone(), std::time::Duration::from_secs(2));
+        Self {
+            pool,
+            store,
+            signing_key,
+            key_id,
+        }
+    }
+
+    pub fn engine(&self, client_ext_oid: &str) -> Arc<dyn PolicyEngine> {
+        Arc::new(PostgresPolicyEngine::new(client_ext_oid, self.store.clone()).unwrap())
+    }
+
+    pub async fn cleanup(&self) {
+        sqlx::query("DELETE FROM permission_registry WHERE signing_key_id = $1")
+            .bind(&self.key_id)
+            .execute(&self.pool)
+            .await
+            .expect("delete test permissions");
+        sqlx::query("DELETE FROM principal_key_permissions WHERE signing_key_id = $1")
+            .bind(&self.key_id)
+            .execute(&self.pool)
+            .await
+            .expect("delete test signer scopes");
+        sqlx::query("DELETE FROM principal_signing_keys WHERE key_id = $1")
+            .bind(&self.key_id)
+            .execute(&self.pool)
+            .await
+            .expect("delete test signing key");
+    }
+
+    pub async fn allow(&self, subject_identity: &str, destination: &str) -> SeededPermission {
+        self.allow_inner(subject_identity, destination, true).await
+    }
+
+    pub async fn allow_without_signer_scope(
+        &self,
+        subject_identity: &str,
+        destination: &str,
+    ) -> SeededPermission {
+        self.allow_inner(subject_identity, destination, false).await
+    }
+
+    pub async fn revoke_permission(&self, permission_id: &str) {
+        sqlx::query("UPDATE permission_registry SET revoked_at = now() WHERE permission_id = $1")
+            .bind(permission_id)
+            .execute(&self.pool)
+            .await
+            .expect("revoke permission");
+    }
+
+    pub async fn revoke_signer(&self) {
+        sqlx::query("UPDATE principal_signing_keys SET revoked_at = now() WHERE key_id = $1")
+            .bind(&self.key_id)
+            .execute(&self.pool)
+            .await
+            .expect("revoke signer");
+    }
+
+    pub async fn tamper_permission_destination(&self, permission_id: &str, destination: &str) {
+        let normalized_destination = agent_gateway::policy::normalize_destination(destination)
+            .expect("normalize tampered destination");
+        sqlx::query("UPDATE permission_registry SET destination = $2 WHERE permission_id = $1")
+            .bind(permission_id)
+            .bind(normalized_destination)
+            .execute(&self.pool)
+            .await
+            .expect("tamper permission destination");
+    }
+
+    async fn allow_inner(
+        &self,
+        subject_identity: &str,
+        destination: &str,
+        include_scope: bool,
+    ) -> SeededPermission {
+        let normalized_destination = agent_gateway::policy::normalize_destination(destination)
+            .expect("normalize destination");
+        let permission_id = unique_id("test-permission");
+        let (not_before, not_after) = active_window();
+
+        if include_scope {
+            sqlx::query(
+                r#"
+                INSERT INTO principal_key_permissions (
+                    signing_key_id, subject_identity, destination, not_before, not_after
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                "#,
+            )
+            .bind(&self.key_id)
+            .bind(subject_identity)
+            .bind(&normalized_destination)
+            .bind(not_before)
+            .bind(not_after)
+            .execute(&self.pool)
+            .await
+            .expect("insert signer scope");
+        }
+
+        let signed_bytes = test_canonical_permission_bytes(
+            &permission_id,
+            &self.key_id,
+            subject_identity,
+            &normalized_destination,
+            not_before,
+            not_after,
+        );
+        let signature: p256::ecdsa::Signature = self.signing_key.sign(&signed_bytes);
+
+        sqlx::query(
+            r#"
+            INSERT INTO permission_registry (
+                permission_id, signing_key_id, subject_identity, destination,
+                not_before, not_after, signature
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(&permission_id)
+        .bind(&self.key_id)
+        .bind(subject_identity)
+        .bind(&normalized_destination)
+        .bind(not_before)
+        .bind(not_after)
+        .bind(signature.to_der().as_bytes())
+        .execute(&self.pool)
+        .await
+        .expect("insert signed permission");
+
+        SeededPermission {
+            permission_id,
+            normalized_destination,
+        }
+    }
+}
+
+pub struct TestPolicyEngine {
+    engine: Arc<dyn PolicyEngine>,
+    registry: TestAuthzRegistry,
+}
+
+impl TestPolicyEngine {
+    pub fn engine(&self) -> Arc<dyn PolicyEngine> {
+        self.engine.clone()
+    }
+
+    pub async fn cleanup(&self) {
+        self.registry.cleanup().await;
+    }
+}
+
+pub async fn postgres_engine_allowing(
+    client_ext_oid: &str,
+    subject_identity: &str,
+    destinations: Vec<String>,
+) -> TestPolicyEngine {
+    let registry = TestAuthzRegistry::new().await;
+    for destination in destinations {
+        registry.allow(subject_identity, &destination).await;
+    }
+    let engine = registry.engine(client_ext_oid);
+    TestPolicyEngine { engine, registry }
+}
+
+fn test_signing_key() -> SigningKey {
+    let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+    let mut bytes = [0u8; 32];
+    bytes[20..24].copy_from_slice(&std::process::id().to_be_bytes());
+    bytes[24..].copy_from_slice(&id.to_be_bytes());
+    SigningKey::from_slice(&bytes).expect("build deterministic test signing key")
+}
+
+fn unique_id(prefix: &str) -> String {
+    let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{}-{id}", std::process::id())
+}
+
+pub fn unique_test_identity(prefix: &str) -> String {
+    unique_id(prefix)
+}
+
+fn active_window() -> (DateTime<Utc>, DateTime<Utc>) {
+    let now = DateTime::<Utc>::from_timestamp(Utc::now().timestamp(), 0).unwrap();
+    (now - Duration::hours(1), now + Duration::hours(1))
+}
+
+fn test_canonical_permission_bytes(
+    permission_id: &str,
+    signing_key_id: &str,
+    subject_identity: &str,
+    destination: &str,
+    not_before: DateTime<Utc>,
+    not_after: DateTime<Utc>,
+) -> Vec<u8> {
+    format!(
+        "agent-gateway-permission-v1\npermission_id={permission_id}\nsigning_key_id={signing_key_id}\nsubject_identity={subject_identity}\ndestination={destination}\nnot_before={}\nnot_after={}\n",
+        not_before.to_rfc3339_opts(SecondsFormat::Micros, true),
+        not_after.to_rfc3339_opts(SecondsFormat::Micros, true),
+    )
+    .into_bytes()
+}
+
 // ---------------------------------------------------------------------------
 // E2E harness: proxy, client, echo server
 // ---------------------------------------------------------------------------
@@ -325,7 +610,12 @@ impl Drop for ServerGuard {
 
 /// Start the real proxy in-process. Returns the bound address and a guard
 /// that stops the server when dropped or explicitly shut down.
-pub async fn start_proxy(pki: &TestPki, policy_config: PolicyConfig) -> (SocketAddr, ServerGuard) {
+pub async fn start_proxy(
+    pki: &TestPki,
+    policy_engine: Arc<dyn PolicyEngine>,
+) -> (SocketAddr, ServerGuard) {
+    install_test_crypto_provider();
+
     let mut ca_store = rustls::RootCertStore::empty();
     ca_store.add(pki.ca_cert_der()).unwrap();
 
@@ -340,9 +630,6 @@ pub async fn start_proxy(pki: &TestPki, policy_config: PolicyConfig) -> (SocketA
     server_config.alpn_protocols = vec![b"h2".to_vec()];
 
     let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
-
-    let policy_engine: Arc<dyn agent_gateway::policy::PolicyEngine> =
-        Arc::new(TomlPolicyEngine::new(policy_config).unwrap());
 
     let make_service = Arc::new(MakeProxyService::new(policy_engine));
 
@@ -390,6 +677,8 @@ pub async fn connect_client(
     proxy_addr: SocketAddr,
     pki: &TestPki,
 ) -> hyper::client::conn::http2::SendRequest<http_body_util::Empty<bytes::Bytes>> {
+    install_test_crypto_provider();
+
     let mut ca_store = rustls::RootCertStore::empty();
     ca_store.add(pki.ca_cert_der()).unwrap();
 
@@ -425,6 +714,8 @@ pub async fn try_request_with_tls_config(
     client_config: rustls::ClientConfig,
     dest_authority: &str,
 ) -> Result<hyper::Response<hyper::body::Incoming>, Box<dyn std::error::Error + Send + Sync>> {
+    install_test_crypto_provider();
+
     let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
     let tcp = tokio::net::TcpStream::connect(proxy_addr).await?;
     let server_name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
@@ -452,6 +743,8 @@ pub async fn connect_client_with_cert(
     client_cert_chain: Vec<CertificateDer<'static>>,
     client_key: PrivateKeyDer<'static>,
 ) -> hyper::client::conn::http2::SendRequest<http_body_util::Empty<bytes::Bytes>> {
+    install_test_crypto_provider();
+
     let mut ca_store = rustls::RootCertStore::empty();
     ca_store.add(ca_cert).unwrap();
 

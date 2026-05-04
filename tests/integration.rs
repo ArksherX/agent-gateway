@@ -2,38 +2,16 @@ mod common;
 
 use std::sync::Arc;
 
-use common::TestPki;
+use common::{TestAuthzRegistry, TestPki, unique_test_identity};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
-use agent_gateway::config::{PolicyConfig, PolicyRule};
-use agent_gateway::policy::{self, PolicyDecision, PolicyEngine, RequestContext, TomlPolicyEngine};
+use agent_gateway::policy::{self, PolicyDecision, PolicyEngine, RequestContext};
 use agent_gateway::proxy::Destination;
 
-fn test_policy_config() -> PolicyConfig {
-    PolicyConfig {
-        client_ext_oid: "1.3.6.1.4.1.57264.1.1".into(),
-        rules: vec![PolicyRule {
-            extension_value: "agent-alpha".into(),
-            allowed_destinations: vec![
-                "api.example.com:443".into(),
-                "custom.example.com:8443".into(),
-            ],
-        }],
-    }
-}
+const EXT_OID: &str = "1.3.6.1.4.1.57264.1.1";
 
-fn test_policy_config_default_port() -> PolicyConfig {
-    PolicyConfig {
-        client_ext_oid: "1.3.6.1.4.1.57264.1.1".into(),
-        rules: vec![PolicyRule {
-            extension_value: "agent-alpha".into(),
-            allowed_destinations: vec!["api.example.com".into()],
-        }],
-    }
-}
-
-async fn eval(engine: &TomlPolicyEngine, pki: &TestPki, dest: &str) -> PolicyDecision {
+async fn eval(engine: &dyn PolicyEngine, pki: &TestPki, dest: &str) -> PolicyDecision {
     let ctx = RequestContext {
         peer_certificates: pki.client_cert_chain(),
         destination: dest.into(),
@@ -172,52 +150,76 @@ fn normalize_trims_whitespace() {
 
 #[tokio::test]
 async fn policy_allows_matching_cert_and_destination() {
-    let pki = TestPki::new("agent-alpha");
-    let engine = TomlPolicyEngine::new(test_policy_config()).unwrap();
-    assert_allow(eval(&engine, &pki, "api.example.com:443").await);
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "api.example.com:443").await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    assert_allow(eval(engine.as_ref(), &pki, "api.example.com:443").await);
+    registry.cleanup().await;
 }
 
 #[tokio::test]
 async fn policy_allows_explicit_non_default_port() {
-    let pki = TestPki::new("agent-alpha");
-    let engine = TomlPolicyEngine::new(test_policy_config()).unwrap();
-    assert_allow(eval(&engine, &pki, "custom.example.com:8443").await);
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "custom.example.com:8443").await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    assert_allow(eval(engine.as_ref(), &pki, "custom.example.com:8443").await);
+    registry.cleanup().await;
 }
 
 #[tokio::test]
 async fn policy_denies_wrong_destination() {
-    let pki = TestPki::new("agent-alpha");
-    let engine = TomlPolicyEngine::new(test_policy_config()).unwrap();
-    match eval(&engine, &pki, "evil.example.com:443").await {
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "api.example.com:443").await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    match eval(engine.as_ref(), &pki, "evil.example.com:443").await {
         PolicyDecision::Deny {
             source_identity, ..
-        } => assert_eq!(source_identity.as_deref(), Some("agent-alpha")),
+        } => assert_eq!(source_identity.as_deref(), Some(subject.as_str())),
         PolicyDecision::Allow { .. } => panic!("expected Deny"),
     }
+    registry.cleanup().await;
 }
 
 #[tokio::test]
 async fn policy_denies_wrong_port() {
-    let pki = TestPki::new("agent-alpha");
-    let engine = TomlPolicyEngine::new(test_policy_config()).unwrap();
-    assert_deny(eval(&engine, &pki, "api.example.com:8080").await);
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "api.example.com:443").await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    assert_deny(eval(engine.as_ref(), &pki, "api.example.com:8080").await);
+    registry.cleanup().await;
 }
 
 #[tokio::test]
 async fn policy_denies_unknown_extension_value() {
-    let pki = TestPki::new("agent-unknown");
-    let engine = TomlPolicyEngine::new(test_policy_config()).unwrap();
-    match eval(&engine, &pki, "api.example.com:443").await {
+    let subject = unique_test_identity("agent-alpha");
+    let unknown_subject = unique_test_identity("agent-unknown");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "api.example.com:443").await;
+    let pki = TestPki::new(&unknown_subject);
+    let engine = registry.engine(EXT_OID);
+    match eval(engine.as_ref(), &pki, "api.example.com:443").await {
         PolicyDecision::Deny {
             source_identity, ..
-        } => assert_eq!(source_identity.as_deref(), Some("agent-unknown")),
+        } => assert_eq!(source_identity.as_deref(), Some(unknown_subject.as_str())),
         PolicyDecision::Allow { .. } => panic!("expected Deny"),
     }
+    registry.cleanup().await;
 }
 
 #[tokio::test]
 async fn policy_denies_no_cert() {
-    let engine = TomlPolicyEngine::new(test_policy_config()).unwrap();
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "api.example.com:443").await;
+    let engine = registry.engine(EXT_OID);
     let ctx = RequestContext {
         peer_certificates: vec![],
         destination: "api.example.com:443".into(),
@@ -228,64 +230,122 @@ async fn policy_denies_no_cert() {
         } => assert!(source_identity.is_none()),
         PolicyDecision::Allow { .. } => panic!("expected Deny"),
     }
+    registry.cleanup().await;
 }
 
 // ---- Default port (443) ----
 
 #[tokio::test]
 async fn policy_config_without_port_defaults_to_443() {
-    let pki = TestPki::new("agent-alpha");
-    let engine = TomlPolicyEngine::new(test_policy_config_default_port()).unwrap();
-    assert_allow(eval(&engine, &pki, "api.example.com:443").await);
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "api.example.com").await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    assert_allow(eval(engine.as_ref(), &pki, "api.example.com:443").await);
+    registry.cleanup().await;
 }
 
 #[tokio::test]
 async fn policy_config_without_port_denies_non_443() {
-    let pki = TestPki::new("agent-alpha");
-    let engine = TomlPolicyEngine::new(test_policy_config_default_port()).unwrap();
-    assert_deny(eval(&engine, &pki, "api.example.com:8080").await);
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "api.example.com").await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    assert_deny(eval(engine.as_ref(), &pki, "api.example.com:8080").await);
+    registry.cleanup().await;
 }
 
 // ---- IPv6 policy matching ----
 
 #[tokio::test]
 async fn policy_ipv6_config_matches_bracketed_request() {
-    let config = PolicyConfig {
-        client_ext_oid: "1.3.6.1.4.1.57264.1.1".into(),
-        rules: vec![PolicyRule {
-            extension_value: "agent-alpha".into(),
-            allowed_destinations: vec!["[::1]:8443".into()],
-        }],
-    };
-    let pki = TestPki::new("agent-alpha");
-    let engine = TomlPolicyEngine::new(config).unwrap();
-    assert_allow(eval(&engine, &pki, "[::1]:8443").await);
-    assert_deny(eval(&engine, &pki, "[::1]:443").await);
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "[::1]:8443").await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    assert_allow(eval(engine.as_ref(), &pki, "[::1]:8443").await);
+    assert_deny(eval(engine.as_ref(), &pki, "[::1]:443").await);
+    registry.cleanup().await;
 }
 
 #[tokio::test]
 async fn policy_bare_ipv6_config_matches_bracketed_request() {
-    let config = PolicyConfig {
-        client_ext_oid: "1.3.6.1.4.1.57264.1.1".into(),
-        rules: vec![PolicyRule {
-            extension_value: "agent-alpha".into(),
-            allowed_destinations: vec!["::1".into()],
-        }],
-    };
-    let pki = TestPki::new("agent-alpha");
-    let engine = TomlPolicyEngine::new(config).unwrap();
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "::1").await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
     // bare "::1" in config normalizes to "[::1]:443", request "[::1]:443" should match
-    assert_allow(eval(&engine, &pki, "[::1]:443").await);
-    assert_deny(eval(&engine, &pki, "[::1]:8080").await);
+    assert_allow(eval(engine.as_ref(), &pki, "[::1]:443").await);
+    assert_deny(eval(engine.as_ref(), &pki, "[::1]:8080").await);
+    registry.cleanup().await;
 }
 
 // ---- Case insensitivity ----
 
 #[tokio::test]
 async fn policy_destination_matching_is_case_insensitive() {
-    let pki = TestPki::new("agent-alpha");
-    let engine = TomlPolicyEngine::new(test_policy_config()).unwrap();
-    assert_allow(eval(&engine, &pki, "API.EXAMPLE.COM:443").await);
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "api.example.com:443").await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    assert_allow(eval(engine.as_ref(), &pki, "API.EXAMPLE.COM:443").await);
+    registry.cleanup().await;
+}
+
+#[tokio::test]
+async fn policy_denies_tampered_permission_destination() {
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    let permission = registry.allow(&subject, "api.example.com:443").await;
+    registry
+        .tamper_permission_destination(&permission.permission_id, "evil.example.com:443")
+        .await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    assert_deny(eval(engine.as_ref(), &pki, "evil.example.com:443").await);
+    registry.cleanup().await;
+}
+
+#[tokio::test]
+async fn policy_denies_revoked_permission() {
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    let permission = registry.allow(&subject, "api.example.com:443").await;
+    registry.revoke_permission(&permission.permission_id).await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    assert_deny(eval(engine.as_ref(), &pki, "api.example.com:443").await);
+    registry.cleanup().await;
+}
+
+#[tokio::test]
+async fn policy_denies_revoked_signer() {
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "api.example.com:443").await;
+    registry.revoke_signer().await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    assert_deny(eval(engine.as_ref(), &pki, "api.example.com:443").await);
+    registry.cleanup().await;
+}
+
+#[tokio::test]
+async fn policy_denies_signer_scope_violation() {
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry
+        .allow_without_signer_scope(&subject, "api.example.com:443")
+        .await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
+    assert_deny(eval(engine.as_ref(), &pki, "api.example.com:443").await);
+    registry.cleanup().await;
 }
 
 // ---- TLS PKI ----
@@ -319,19 +379,30 @@ fn test_pki_generates_valid_mtls_config() {
 
 #[test]
 fn config_validates_oid() {
-    let config = PolicyConfig {
-        client_ext_oid: "not-a-valid-oid".into(),
-        rules: vec![PolicyRule {
-            extension_value: "x".into(),
-            allowed_destinations: vec!["a:443".into()],
-        }],
-    };
-    assert!(TomlPolicyEngine::new(config).is_err());
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0:8443"
+tls_cert_path = "c.pem"
+tls_key_path = "k.pem"
+client_ca_path = "ca.pem"
+
+[observability]
+log_level = "info"
+
+[policy]
+client_ext_oid = "not-a-valid-oid"
+database_url = "postgres://example.invalid/agent_gateway"
+"#;
+    let tmpdir = std::env::temp_dir().join("agent_gw_test_config");
+    std::fs::create_dir_all(&tmpdir).ok();
+    let path = tmpdir.join("reject_bad_oid.toml");
+    std::fs::write(&path, toml).unwrap();
+    assert!(agent_gateway::config::Config::load(&path).is_err());
 }
 
 #[test]
-fn config_rejects_malformed_destination() {
-    let make = |dest: &str| {
+fn config_requires_exactly_one_database_url_source() {
+    let make = |policy: &str| {
         let toml = format!(
             r#"
 [server]
@@ -345,31 +416,52 @@ log_level = "info"
 
 [policy]
 client_ext_oid = "1.3.6.1.4.1.57264.1.1"
-
-[[policy.rules]]
-extension_value = "x"
-allowed_destinations = ["{dest}"]
+{policy}
 "#
         );
         let tmpdir = std::env::temp_dir().join("agent_gw_test_config");
         std::fs::create_dir_all(&tmpdir).ok();
-        let path = tmpdir.join(format!("bad_{}.toml", dest.replace([':', '[', ']'], "_")));
+        let path = tmpdir.join(format!("policy_{}.toml", policy.len()));
         std::fs::write(&path, &toml).unwrap();
         agent_gateway::config::Config::load(&path)
     };
 
-    // Empty destination
     assert!(make("").is_err());
-    // Non-numeric port
-    assert!(make("host:abc").is_err());
-    // Missing close bracket
-    assert!(make("[::1").is_err());
+    assert!(make("database_url = \"postgres://example.invalid/agent_gateway\"").is_ok());
+    assert!(make("database_url_env = \"TEST_DATABASE_URL\"").is_ok());
+    assert!(
+        make(
+            "database_url = \"postgres://example.invalid/agent_gateway\"\ndatabase_url_env = \"TEST_DATABASE_URL\""
+        )
+        .is_err()
+    );
+}
 
-    // Valid ones should pass
-    assert!(make("api.example.com").is_ok());
-    assert!(make("api.example.com:443").is_ok());
-    assert!(make("[::1]:443").is_ok());
-    assert!(make("[::1]").is_ok());
+#[test]
+fn config_rejects_removed_policy_rules() {
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0:8443"
+tls_cert_path = "c.pem"
+tls_key_path = "k.pem"
+client_ca_path = "ca.pem"
+
+[observability]
+log_level = "info"
+
+[policy]
+client_ext_oid = "1.3.6.1.4.1.57264.1.1"
+database_url = "postgres://example.invalid/agent_gateway"
+
+[[policy.rules]]
+extension_value = "x"
+allowed_destinations = ["api.example.com"]
+"#;
+    let tmpdir = std::env::temp_dir().join("agent_gw_test_config");
+    std::fs::create_dir_all(&tmpdir).ok();
+    let path = tmpdir.join("reject_policy_rules.toml");
+    std::fs::write(&path, toml).unwrap();
+    assert!(agent_gateway::config::Config::load(&path).is_err());
 }
 
 #[test]
@@ -387,10 +479,7 @@ metrics_bind = "0.0.0.0:9090"
 
 [policy]
 client_ext_oid = "1.3.6.1.4.1.57264.1.1"
-
-[[policy.rules]]
-extension_value = "x"
-allowed_destinations = ["api.example.com"]
+database_url = "postgres://example.invalid/agent_gateway"
 "#;
     let tmpdir = std::env::temp_dir().join("agent_gw_test_config");
     std::fs::create_dir_all(&tmpdir).ok();
@@ -466,21 +555,18 @@ fn proxy_dest_ipv6_full_address() {
 
 #[tokio::test]
 async fn proxy_dest_ipv6_matches_policy() {
-    let config = PolicyConfig {
-        client_ext_oid: "1.3.6.1.4.1.57264.1.1".into(),
-        rules: vec![PolicyRule {
-            extension_value: "agent-alpha".into(),
-            allowed_destinations: vec!["[::1]:8443".into()],
-        }],
-    };
-    let pki = TestPki::new("agent-alpha");
-    let engine = TomlPolicyEngine::new(config).unwrap();
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    registry.allow(&subject, "[::1]:8443").await;
+    let pki = TestPki::new(&subject);
+    let engine = registry.engine(EXT_OID);
 
     // Simulate what proxy.rs produces for a CONNECT [::1]:8443 request
     let d = parse_dest("[::1]:8443").unwrap();
-    assert_allow(eval(&engine, &pki, &d.authority).await);
+    assert_allow(eval(engine.as_ref(), &pki, &d.authority).await);
 
     // Wrong port should deny
     let d2 = parse_dest("[::1]:443").unwrap();
-    assert_deny(eval(&engine, &pki, &d2.authority).await);
+    assert_deny(eval(engine.as_ref(), &pki, &d2.authority).await);
+    registry.cleanup().await;
 }

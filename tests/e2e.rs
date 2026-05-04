@@ -1,10 +1,10 @@
 mod common;
 
-use agent_gateway::config::{PolicyConfig, PolicyRule};
 use common::{
-    TestPki, allocate_closed_port, connect_client_with_cert, drain_events, find_event,
-    generate_client_cert, generate_client_cert_no_extension, init_tracing_capture,
-    serial_test_lock, start_echo_server, start_proxy, try_request_with_tls_config, wait_for_event,
+    TestPki, TestPolicyEngine, allocate_closed_port, connect_client_with_cert, drain_events,
+    find_event, generate_client_cert, generate_client_cert_no_extension, init_tracing_capture,
+    install_test_crypto_provider, postgres_engine_allowing, serial_test_lock, start_echo_server,
+    start_proxy, try_request_with_tls_config, unique_test_identity, wait_for_event,
 };
 use http_body_util::Empty;
 use hyper::Request;
@@ -12,17 +12,10 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const EXT_OID: &str = "1.3.6.1.4.1.57264.1.1";
-const EXT_VALUE: &str = "agent-alpha";
 const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-fn policy_allowing(destinations: Vec<String>) -> PolicyConfig {
-    PolicyConfig {
-        client_ext_oid: EXT_OID.to_owned(),
-        rules: vec![PolicyRule {
-            extension_value: EXT_VALUE.to_owned(),
-            allowed_destinations: destinations,
-        }],
-    }
+async fn policy_allowing(subject_identity: &str, destinations: Vec<String>) -> TestPolicyEngine {
+    postgres_engine_allowing(EXT_OID, subject_identity, destinations).await
 }
 
 fn assert_field_eq(event: &common::CapturedEvent, field: &str, expected: &str) {
@@ -59,9 +52,10 @@ async fn tunnel_echoes_data() {
 
     let (echo_addr, _echo_guard) = start_echo_server().await;
 
-    let policy = policy_allowing(vec![format!("127.0.0.1:{}", echo_addr.port())]);
-    let pki = TestPki::new(EXT_VALUE);
-    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy).await;
+    let subject = unique_test_identity("agent-alpha");
+    let policy = policy_allowing(&subject, vec![format!("127.0.0.1:{}", echo_addr.port())]).await;
+    let pki = TestPki::new(&subject);
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     let mut send_req = common::connect_client(proxy_addr, &pki).await;
 
@@ -87,13 +81,13 @@ async fn tunnel_echoes_data() {
 
     let allowed_evt =
         find_event(&events, "CONNECT allowed").expect("expected CONNECT allowed event");
-    assert_field_eq(allowed_evt, "source_identity", EXT_VALUE);
+    assert_field_eq(allowed_evt, "source_identity", &subject);
     assert_source_peer_addr(allowed_evt);
     assert_field_eq(allowed_evt, "dest_authority", &dest);
     assert_field_eq(allowed_evt, "policy_decision", "allow");
 
     let closed_evt = find_event(&events, "tunnel closed").expect("expected tunnel closed event");
-    assert_field_eq(closed_evt, "source_identity", EXT_VALUE);
+    assert_field_eq(closed_evt, "source_identity", &subject);
     assert_source_peer_addr(closed_evt);
     assert_field_eq(closed_evt, "dest_authority", &dest);
     let c2d: u64 = closed_evt
@@ -110,6 +104,7 @@ async fn tunnel_echoes_data() {
         .unwrap();
     assert!(c2d > 0, "bytes_client_to_dest should be > 0, got {c2d}");
     assert!(d2c > 0, "bytes_dest_to_client should be > 0, got {d2c}");
+    policy.cleanup().await;
 }
 
 #[tokio::test]
@@ -118,9 +113,10 @@ async fn tunnel_policy_deny() {
     let log = init_tracing_capture();
     drain_events(&log);
 
-    let policy = policy_allowing(vec!["allowed.example.com:443".to_owned()]);
-    let pki = TestPki::new(EXT_VALUE);
-    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy).await;
+    let subject = unique_test_identity("agent-alpha");
+    let policy = policy_allowing(&subject, vec!["allowed.example.com:443".to_owned()]).await;
+    let pki = TestPki::new(&subject);
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     let mut send_req = common::connect_client(proxy_addr, &pki).await;
 
@@ -137,11 +133,12 @@ async fn tunnel_policy_deny() {
 
     let events = wait_for_event(&log, "CONNECT denied", EVENT_TIMEOUT).await;
     let denied_evt = find_event(&events, "CONNECT denied").expect("expected CONNECT denied event");
-    assert_field_eq(denied_evt, "source_identity", EXT_VALUE);
+    assert_field_eq(denied_evt, "source_identity", &subject);
     assert_source_peer_addr(denied_evt);
     assert_field_eq(denied_evt, "dest_authority", "127.0.0.1:9999");
     assert_field_eq(denied_evt, "policy_decision", "deny");
     assert_field_present(denied_evt, "deny_reason");
+    policy.cleanup().await;
 }
 
 #[tokio::test]
@@ -153,9 +150,10 @@ async fn tunnel_unreachable_destination() {
     let closed_port = allocate_closed_port().await;
     let dest = format!("127.0.0.1:{closed_port}");
 
-    let policy = policy_allowing(vec![dest.clone()]);
-    let pki = TestPki::new(EXT_VALUE);
-    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy).await;
+    let subject = unique_test_identity("agent-alpha");
+    let policy = policy_allowing(&subject, vec![dest.clone()]).await;
+    let pki = TestPki::new(&subject);
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     let mut send_req = common::connect_client(proxy_addr, &pki).await;
 
@@ -173,10 +171,11 @@ async fn tunnel_unreachable_destination() {
     let events = wait_for_event(&log, "TCP connect failed", EVENT_TIMEOUT).await;
     let tcp_fail =
         find_event(&events, "TCP connect failed").expect("expected TCP connect failed event");
-    assert_field_eq(tcp_fail, "source_identity", EXT_VALUE);
+    assert_field_eq(tcp_fail, "source_identity", &subject);
     assert_source_peer_addr(tcp_fail);
     assert_field_eq(tcp_fail, "dest_authority", &dest);
     assert_field_present(tcp_fail, "error");
+    policy.cleanup().await;
 }
 
 #[tokio::test]
@@ -185,9 +184,10 @@ async fn non_connect_method_rejected() {
     let log = init_tracing_capture();
     drain_events(&log);
 
-    let policy = policy_allowing(vec!["example.com:443".to_owned()]);
-    let pki = TestPki::new(EXT_VALUE);
-    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy).await;
+    let subject = unique_test_identity("agent-alpha");
+    let policy = policy_allowing(&subject, vec!["example.com:443".to_owned()]).await;
+    let pki = TestPki::new(&subject);
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     let mut send_req = common::connect_client(proxy_addr, &pki).await;
 
@@ -213,6 +213,7 @@ async fn non_connect_method_rejected() {
         find_event(&events, "CONNECT denied").is_none(),
         "should not see CONNECT denied for non-CONNECT request"
     );
+    policy.cleanup().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -227,10 +228,11 @@ async fn tunnel_wrong_extension_denied() {
 
     let (echo_addr, _echo_guard) = start_echo_server().await;
 
-    // Policy allows agent-alpha, but client cert has agent-beta
-    let policy = policy_allowing(vec![format!("127.0.0.1:{}", echo_addr.port())]);
-    let pki = TestPki::new("agent-beta");
-    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy).await;
+    let subject = unique_test_identity("agent-alpha");
+    let wrong_subject = unique_test_identity("agent-beta");
+    let policy = policy_allowing(&subject, vec![format!("127.0.0.1:{}", echo_addr.port())]).await;
+    let pki = TestPki::new(&wrong_subject);
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     let mut send_req = common::connect_client(proxy_addr, &pki).await;
 
@@ -248,7 +250,7 @@ async fn tunnel_wrong_extension_denied() {
 
     let events = wait_for_event(&log, "CONNECT denied", EVENT_TIMEOUT).await;
     let denied = find_event(&events, "CONNECT denied").expect("expected CONNECT denied event");
-    assert_field_eq(denied, "source_identity", "agent-beta");
+    assert_field_eq(denied, "source_identity", &wrong_subject);
     assert_source_peer_addr(denied);
     assert_field_eq(denied, "dest_authority", &dest);
     assert_field_eq(denied, "policy_decision", "deny");
@@ -257,9 +259,10 @@ async fn tunnel_wrong_extension_denied() {
         .get("deny_reason")
         .expect("should have reason");
     assert!(
-        reason.contains("agent-beta"),
+        reason.contains(&wrong_subject),
         "denial reason should mention the unrecognized extension value; got: {reason}"
     );
+    policy.cleanup().await;
 }
 
 #[tokio::test]
@@ -271,14 +274,15 @@ async fn tunnel_missing_extension_denied() {
     let (echo_addr, _echo_guard) = start_echo_server().await;
 
     // Use a client cert that has NO custom extension at all
-    let pki = TestPki::new(EXT_VALUE); // base PKI for CA + server cert
+    let subject = unique_test_identity("agent-alpha");
+    let pki = TestPki::new(&subject); // base PKI for CA + server cert
     let (no_ext_cert, no_ext_key) =
         generate_client_cert_no_extension(&pki.ca).expect("generate client cert (no ext)");
     let client_cert_chain = vec![CertificateDer::from(no_ext_cert.der().to_vec())];
     let client_key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(no_ext_key.serialize_der()));
 
-    let policy = policy_allowing(vec![format!("127.0.0.1:{}", echo_addr.port())]);
-    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy).await;
+    let policy = policy_allowing(&subject, vec![format!("127.0.0.1:{}", echo_addr.port())]).await;
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     let mut send_req =
         connect_client_with_cert(proxy_addr, pki.ca_cert_der(), client_cert_chain, client_key)
@@ -313,6 +317,7 @@ async fn tunnel_missing_extension_denied() {
         reason.contains("missing required extension"),
         "denial reason should mention missing extension; got: {reason}"
     );
+    policy.cleanup().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -325,11 +330,13 @@ async fn mtls_no_client_cert_rejected() {
     let log = init_tracing_capture();
     drain_events(&log);
 
-    let policy = policy_allowing(vec!["example.com:443".to_owned()]);
-    let pki = TestPki::new(EXT_VALUE);
-    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy).await;
+    let subject = unique_test_identity("agent-alpha");
+    let policy = policy_allowing(&subject, vec!["example.com:443".to_owned()]).await;
+    let pki = TestPki::new(&subject);
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     // Client trusts the proxy's server cert CA but presents NO client cert.
+    install_test_crypto_provider();
     let mut ca_store = rustls::RootCertStore::empty();
     ca_store.add(pki.ca_cert_der()).unwrap();
 
@@ -361,6 +368,7 @@ async fn mtls_no_client_cert_rejected() {
         find_event(&events, "CONNECT denied").is_none(),
         "no request should reach policy evaluation"
     );
+    policy.cleanup().await;
 }
 
 #[tokio::test]
@@ -369,19 +377,21 @@ async fn mtls_untrusted_ca_rejected() {
     let log = init_tracing_capture();
     drain_events(&log);
 
-    let policy = policy_allowing(vec!["example.com:443".to_owned()]);
-    let pki = TestPki::new(EXT_VALUE);
-    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy).await;
+    let subject = unique_test_identity("agent-alpha");
+    let policy = policy_allowing(&subject, vec!["example.com:443".to_owned()]).await;
+    let pki = TestPki::new(&subject);
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     // Generate a completely separate CA + client cert not trusted by the proxy
     let rogue_ca = common::generate_ca().expect("generate rogue CA");
     let (rogue_cert, rogue_key) =
-        generate_client_cert(&rogue_ca, EXT_VALUE).expect("generate rogue client cert");
+        generate_client_cert(&rogue_ca, &subject).expect("generate rogue client cert");
     let rogue_cert_chain = vec![CertificateDer::from(rogue_cert.der().to_vec())];
     let rogue_key_der = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(rogue_key.serialize_der()));
 
     // Client trusts the proxy's CA (for the server cert) but presents a cert
     // signed by the rogue CA that the proxy does NOT trust.
+    install_test_crypto_provider();
     let mut ca_store = rustls::RootCertStore::empty();
     ca_store.add(pki.ca_cert_der()).unwrap();
 
@@ -414,4 +424,5 @@ async fn mtls_untrusted_ca_rejected() {
         find_event(&events, "CONNECT denied").is_none(),
         "no request should reach policy evaluation"
     );
+    policy.cleanup().await;
 }

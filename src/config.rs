@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -33,14 +33,12 @@ pub struct ObservabilityConfig {
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     pub client_ext_oid: String,
-    pub rules: Vec<PolicyRule>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PolicyRule {
-    pub extension_value: String,
-    pub allowed_destinations: Vec<String>,
+    pub database_url: Option<String>,
+    pub database_url_env: Option<String>,
+    pub max_connections: Option<u32>,
+    pub connect_timeout_ms: Option<u64>,
+    pub pool_acquire_timeout_ms: Option<u64>,
+    pub query_timeout_ms: Option<u64>,
 }
 
 impl Config {
@@ -57,24 +55,94 @@ impl Config {
             .parse::<std::net::SocketAddr>()
             .map_err(|e| anyhow::anyhow!("invalid server.listen_addr: {e}"))?;
 
-        let _oid = x509_parser::oid_registry::Oid::from_str(&self.policy.client_ext_oid)
-            .map_err(|e| anyhow::anyhow!("invalid policy.client_ext_oid: {e:?}"))?;
-
-        for (i, rule) in self.policy.rules.iter().enumerate() {
-            anyhow::ensure!(
-                !rule.extension_value.is_empty(),
-                "policy.rules[{i}].extension_value must not be empty"
-            );
-            anyhow::ensure!(
-                !rule.allowed_destinations.is_empty(),
-                "policy.rules[{i}].allowed_destinations must not be empty"
-            );
-            for (j, dest) in rule.allowed_destinations.iter().enumerate() {
-                policy::normalize_destination(dest).map_err(|e| {
-                    anyhow::anyhow!("policy.rules[{i}].allowed_destinations[{j}]: {e}")
-                })?;
-            }
-        }
+        policy::parse_client_ext_oid(&self.policy.client_ext_oid)?;
+        self.policy.validate()?;
         Ok(())
     }
+}
+
+impl PolicyConfig {
+    pub fn database_url(&self) -> anyhow::Result<String> {
+        match (&self.database_url, &self.database_url_env) {
+            (Some(url), None) => {
+                anyhow::ensure!(!url.is_empty(), "policy.database_url must not be empty");
+                Ok(url.clone())
+            }
+            (None, Some(env_name)) => {
+                anyhow::ensure!(
+                    !env_name.is_empty(),
+                    "policy.database_url_env must not be empty"
+                );
+                let url = std::env::var(env_name)
+                    .map_err(|e| anyhow::anyhow!("reading database URL from ${env_name}: {e}"))?;
+                anyhow::ensure!(
+                    !url.is_empty(),
+                    "database URL from ${env_name} must not be empty"
+                );
+                Ok(url)
+            }
+            (None, None) => {
+                anyhow::bail!("policy.database_url or policy.database_url_env is required")
+            }
+            (Some(_), Some(_)) => {
+                anyhow::bail!("set only one of policy.database_url or policy.database_url_env")
+            }
+        }
+    }
+
+    pub fn max_connections(&self) -> u32 {
+        self.max_connections.unwrap_or(5)
+    }
+
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_millis(self.connect_timeout_ms.unwrap_or(5_000))
+    }
+
+    pub fn pool_acquire_timeout(&self) -> Duration {
+        Duration::from_millis(self.pool_acquire_timeout_ms.unwrap_or(1_000))
+    }
+
+    pub fn query_timeout(&self) -> Duration {
+        Duration::from_millis(self.query_timeout_ms.unwrap_or(500))
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.max_connections() > 0,
+            "policy.max_connections must be greater than zero"
+        );
+        ensure_positive_timeout(self.connect_timeout_ms, "policy.connect_timeout_ms")?;
+        ensure_positive_timeout(
+            self.pool_acquire_timeout_ms,
+            "policy.pool_acquire_timeout_ms",
+        )?;
+        ensure_positive_timeout(self.query_timeout_ms, "policy.query_timeout_ms")?;
+
+        match (&self.database_url, &self.database_url_env) {
+            (Some(url), None) => {
+                anyhow::ensure!(!url.is_empty(), "policy.database_url must not be empty")
+            }
+            (None, Some(env_name)) => {
+                anyhow::ensure!(
+                    !env_name.is_empty(),
+                    "policy.database_url_env must not be empty"
+                )
+            }
+            (None, None) => {
+                anyhow::bail!("policy.database_url or policy.database_url_env is required")
+            }
+            (Some(_), Some(_)) => {
+                anyhow::bail!("set only one of policy.database_url or policy.database_url_env")
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn ensure_positive_timeout(value: Option<u64>, field: &str) -> anyhow::Result<()> {
+    if let Some(value) = value {
+        anyhow::ensure!(value > 0, "{field} must be greater than zero");
+    }
+    Ok(())
 }
