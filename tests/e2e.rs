@@ -8,14 +8,21 @@ use common::{
 };
 use http_body_util::Empty;
 use hyper::Request;
+use rustls::client::ResolvesClientCert;
+use rustls::sign::CertifiedKey;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const EXT_OID: &str = "1.3.6.1.4.1.57264.1.1";
 const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-async fn policy_allowing(subject_identity: &str, destinations: Vec<String>) -> TestPolicyEngine {
-    postgres_engine_allowing(EXT_OID, subject_identity, destinations).await
+async fn policy_allowing(
+    pki: &TestPki,
+    subject_identity: &str,
+    destinations: Vec<String>,
+) -> TestPolicyEngine {
+    postgres_engine_allowing(EXT_OID, pki, subject_identity, destinations).await
 }
 
 fn assert_field_eq(event: &common::CapturedEvent, field: &str, expected: &str) {
@@ -44,6 +51,25 @@ fn assert_source_peer_addr(event: &common::CapturedEvent) {
     );
 }
 
+#[derive(Debug)]
+struct MismatchedClientCertResolver {
+    certified_key: Arc<CertifiedKey>,
+}
+
+impl ResolvesClientCert for MismatchedClientCertResolver {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[rustls::SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        Some(self.certified_key.clone())
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
 #[tokio::test]
 async fn tunnel_echoes_data() {
     let _guard = serial_test_lock();
@@ -53,8 +79,13 @@ async fn tunnel_echoes_data() {
     let (echo_addr, _echo_guard) = start_echo_server().await;
 
     let subject = unique_test_identity("agent-alpha");
-    let policy = policy_allowing(&subject, vec![format!("127.0.0.1:{}", echo_addr.port())]).await;
     let pki = TestPki::new(&subject);
+    let policy = policy_allowing(
+        &pki,
+        &subject,
+        vec![format!("127.0.0.1:{}", echo_addr.port())],
+    )
+    .await;
     let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     let mut send_req = common::connect_client(proxy_addr, &pki).await;
@@ -114,8 +145,8 @@ async fn tunnel_policy_deny() {
     drain_events(&log);
 
     let subject = unique_test_identity("agent-alpha");
-    let policy = policy_allowing(&subject, vec!["allowed.example.com:443".to_owned()]).await;
     let pki = TestPki::new(&subject);
+    let policy = policy_allowing(&pki, &subject, vec!["allowed.example.com:443".to_owned()]).await;
     let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     let mut send_req = common::connect_client(proxy_addr, &pki).await;
@@ -137,7 +168,14 @@ async fn tunnel_policy_deny() {
     assert_source_peer_addr(denied_evt);
     assert_field_eq(denied_evt, "dest_authority", "127.0.0.1:9999");
     assert_field_eq(denied_evt, "policy_decision", "deny");
-    assert_field_present(denied_evt, "deny_reason");
+    let reason = denied_evt
+        .fields
+        .get("deny_reason")
+        .expect("should have deny_reason");
+    assert!(
+        reason.contains("no active signed permission"),
+        "denial should be caused by missing destination permission, got: {reason}"
+    );
     policy.cleanup().await;
 }
 
@@ -151,8 +189,8 @@ async fn tunnel_unreachable_destination() {
     let dest = format!("127.0.0.1:{closed_port}");
 
     let subject = unique_test_identity("agent-alpha");
-    let policy = policy_allowing(&subject, vec![dest.clone()]).await;
     let pki = TestPki::new(&subject);
+    let policy = policy_allowing(&pki, &subject, vec![dest.clone()]).await;
     let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     let mut send_req = common::connect_client(proxy_addr, &pki).await;
@@ -185,8 +223,8 @@ async fn non_connect_method_rejected() {
     drain_events(&log);
 
     let subject = unique_test_identity("agent-alpha");
-    let policy = policy_allowing(&subject, vec!["example.com:443".to_owned()]).await;
     let pki = TestPki::new(&subject);
+    let policy = policy_allowing(&pki, &subject, vec!["example.com:443".to_owned()]).await;
     let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     let mut send_req = common::connect_client(proxy_addr, &pki).await;
@@ -230,7 +268,13 @@ async fn tunnel_wrong_extension_denied() {
 
     let subject = unique_test_identity("agent-alpha");
     let wrong_subject = unique_test_identity("agent-beta");
-    let policy = policy_allowing(&subject, vec![format!("127.0.0.1:{}", echo_addr.port())]).await;
+    let authorized_pki = TestPki::new(&subject);
+    let policy = policy_allowing(
+        &authorized_pki,
+        &subject,
+        vec![format!("127.0.0.1:{}", echo_addr.port())],
+    )
+    .await;
     let pki = TestPki::new(&wrong_subject);
     let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
@@ -281,7 +325,12 @@ async fn tunnel_missing_extension_denied() {
     let client_cert_chain = vec![CertificateDer::from(no_ext_cert.der().to_vec())];
     let client_key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(no_ext_key.serialize_der()));
 
-    let policy = policy_allowing(&subject, vec![format!("127.0.0.1:{}", echo_addr.port())]).await;
+    let policy = policy_allowing(
+        &pki,
+        &subject,
+        vec![format!("127.0.0.1:{}", echo_addr.port())],
+    )
+    .await;
     let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     let mut send_req =
@@ -331,8 +380,8 @@ async fn mtls_no_client_cert_rejected() {
     drain_events(&log);
 
     let subject = unique_test_identity("agent-alpha");
-    let policy = policy_allowing(&subject, vec!["example.com:443".to_owned()]).await;
     let pki = TestPki::new(&subject);
+    let policy = policy_allowing(&pki, &subject, vec!["example.com:443".to_owned()]).await;
     let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
     // Client trusts the proxy's server cert CA but presents NO client cert.
@@ -372,25 +421,74 @@ async fn mtls_no_client_cert_rejected() {
 }
 
 #[tokio::test]
-async fn mtls_untrusted_ca_rejected() {
+async fn mtls_mismatched_cert_and_private_key_rejected() {
     let _guard = serial_test_lock();
     let log = init_tracing_capture();
     drain_events(&log);
 
     let subject = unique_test_identity("agent-alpha");
-    let policy = policy_allowing(&subject, vec!["example.com:443".to_owned()]).await;
     let pki = TestPki::new(&subject);
+    let policy = policy_allowing(&pki, &subject, vec!["example.com:443".to_owned()]).await;
     let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
 
-    // Generate a completely separate CA + client cert not trusted by the proxy
+    let other_key_pki = TestPki::new(&subject);
+    install_test_crypto_provider();
+    let mut ca_store = rustls::RootCertStore::empty();
+    ca_store.add(pki.ca_cert_der()).unwrap();
+    let wrong_key_der = other_key_pki.client_key_der();
+    let wrong_signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&wrong_key_der)
+        .expect("load wrong private key");
+    let mismatched_certified_key = CertifiedKey::new(pki.client_cert_chain(), wrong_signing_key);
+
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(ca_store)
+        .with_client_cert_resolver(Arc::new(MismatchedClientCertResolver {
+            certified_key: Arc::new(mismatched_certified_key),
+        }));
+    client_config.alpn_protocols = vec![b"h2".to_vec()];
+
+    let result = try_request_with_tls_config(proxy_addr, client_config, "example.com:443").await;
+    assert!(
+        result.is_err(),
+        "connection should fail when the client cannot prove possession of the certificate key"
+    );
+
+    let events = wait_for_event(&log, "TLS handshake failed", EVENT_TIMEOUT).await;
+    let handshake_failed = find_event(&events, "TLS handshake failed")
+        .expect("server should log TLS handshake failure");
+    assert_source_peer_addr(handshake_failed);
+    assert!(
+        find_event(&events, "CONNECT allowed").is_none(),
+        "no request should reach policy evaluation"
+    );
+    assert!(
+        find_event(&events, "CONNECT denied").is_none(),
+        "no request should reach policy evaluation"
+    );
+    policy.cleanup().await;
+}
+
+#[tokio::test]
+async fn mtls_accepts_untrusted_ca_but_policy_denies_unregistered_key() {
+    let _guard = serial_test_lock();
+    let log = init_tracing_capture();
+    drain_events(&log);
+
+    let subject = unique_test_identity("agent-alpha");
+    let pki = TestPki::new(&subject);
+    let policy = policy_allowing(&pki, &subject, vec!["example.com:443".to_owned()]).await;
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
+
+    // Generate a separate CA + client cert. TLS accepts the structurally valid
+    // certificate, but policy denies because its SPKI is not in the signed row.
     let rogue_ca = common::generate_ca().expect("generate rogue CA");
     let (rogue_cert, rogue_key) =
         generate_client_cert(&rogue_ca, &subject).expect("generate rogue client cert");
     let rogue_cert_chain = vec![CertificateDer::from(rogue_cert.der().to_vec())];
     let rogue_key_der = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(rogue_key.serialize_der()));
 
-    // Client trusts the proxy's CA (for the server cert) but presents a cert
-    // signed by the rogue CA that the proxy does NOT trust.
+    // Client trusts the proxy's CA for the server cert, but presents a client
+    // cert signed by an unrelated issuer.
     install_test_crypto_provider();
     let mut ca_store = rustls::RootCertStore::empty();
     ca_store.add(pki.ca_cert_der()).unwrap();
@@ -402,27 +500,26 @@ async fn mtls_untrusted_ca_rejected() {
     client_config.alpn_protocols = vec![b"h2".to_vec()];
 
     let result = try_request_with_tls_config(proxy_addr, client_config, "example.com:443").await;
-    assert!(
-        result.is_err(),
-        "connection should fail with client cert from untrusted CA, got: {result:?}"
+    let response = result.expect("TLS should accept any structurally valid client cert");
+    assert_eq!(
+        response.status(),
+        403,
+        "policy should deny same identity/destination with an unregistered key"
     );
 
-    // Server should log the TLS handshake failure, and never reach policy evaluation
-    let events = wait_for_event(&log, "TLS handshake failed", EVENT_TIMEOUT).await;
-    let handshake_failed = find_event(&events, "TLS handshake failed")
-        .expect("server should log TLS handshake failure");
-    assert_source_peer_addr(handshake_failed);
+    let events = wait_for_event(&log, "CONNECT denied", EVENT_TIMEOUT).await;
+    let denied = find_event(&events, "CONNECT denied").expect("expected CONNECT denied event");
+    assert_field_eq(denied, "source_identity", &subject);
+    assert_source_peer_addr(denied);
+    assert_field_eq(denied, "dest_authority", "example.com:443");
+    assert_field_eq(denied, "policy_decision", "deny");
+    let reason = denied
+        .fields
+        .get("deny_reason")
+        .expect("should have deny_reason");
     assert!(
-        !handshake_failed.fields.contains_key("source_identity"),
-        "source_identity should be omitted before client identity is authenticated"
-    );
-    assert!(
-        find_event(&events, "CONNECT allowed").is_none(),
-        "no request should reach policy evaluation"
-    );
-    assert!(
-        find_event(&events, "CONNECT denied").is_none(),
-        "no request should reach policy evaluation"
+        reason.contains("no active signed permission"),
+        "denial should be caused by missing key-bound permission, got: {reason}"
     );
     policy.cleanup().await;
 }

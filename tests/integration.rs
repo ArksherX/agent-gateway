@@ -1,9 +1,10 @@
 mod common;
 
-use std::sync::Arc;
+use std::io::Write;
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use common::{TestAuthzRegistry, TestPki, unique_test_identity};
-use rustls::server::WebPkiClientVerifier;
+use common::{TestAuthzRegistry, TestPki, certificate_spki_der, unique_test_identity};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
 use agent_gateway::policy::{self, PolicyDecision, PolicyEngine, RequestContext};
@@ -152,8 +153,10 @@ fn normalize_trims_whitespace() {
 async fn policy_allows_matching_cert_and_destination() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "api.example.com:443").await;
     let pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
+        .await;
     let engine = registry.engine(EXT_OID);
     assert_allow(eval(engine.as_ref(), &pki, "api.example.com:443").await);
     registry.cleanup().await;
@@ -163,8 +166,10 @@ async fn policy_allows_matching_cert_and_destination() {
 async fn policy_allows_explicit_non_default_port() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "custom.example.com:8443").await;
     let pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&pki, &subject, "custom.example.com:8443")
+        .await;
     let engine = registry.engine(EXT_OID);
     assert_allow(eval(engine.as_ref(), &pki, "custom.example.com:8443").await);
     registry.cleanup().await;
@@ -174,8 +179,10 @@ async fn policy_allows_explicit_non_default_port() {
 async fn policy_denies_wrong_destination() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "api.example.com:443").await;
     let pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
+        .await;
     let engine = registry.engine(EXT_OID);
     match eval(engine.as_ref(), &pki, "evil.example.com:443").await {
         PolicyDecision::Deny {
@@ -190,8 +197,10 @@ async fn policy_denies_wrong_destination() {
 async fn policy_denies_wrong_port() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "api.example.com:443").await;
     let pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
+        .await;
     let engine = registry.engine(EXT_OID);
     assert_deny(eval(engine.as_ref(), &pki, "api.example.com:8080").await);
     registry.cleanup().await;
@@ -202,8 +211,11 @@ async fn policy_denies_unknown_extension_value() {
     let subject = unique_test_identity("agent-alpha");
     let unknown_subject = unique_test_identity("agent-unknown");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "api.example.com:443").await;
     let pki = TestPki::new(&unknown_subject);
+    let authorized_pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&authorized_pki, &subject, "api.example.com:443")
+        .await;
     let engine = registry.engine(EXT_OID);
     match eval(engine.as_ref(), &pki, "api.example.com:443").await {
         PolicyDecision::Deny {
@@ -215,10 +227,39 @@ async fn policy_denies_unknown_extension_value() {
 }
 
 #[tokio::test]
+async fn policy_denies_same_identity_and_destination_with_different_key() {
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    let authorized_pki = TestPki::new(&subject);
+    let different_key_pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&authorized_pki, &subject, "api.example.com:443")
+        .await;
+    let engine = registry.engine(EXT_OID);
+    match eval(engine.as_ref(), &different_key_pki, "api.example.com:443").await {
+        PolicyDecision::Deny {
+            source_identity,
+            reason,
+        } => {
+            assert_eq!(source_identity.as_deref(), Some(subject.as_str()));
+            assert!(
+                reason.contains("no active signed permission"),
+                "denial should be caused by missing key-bound permission, got: {reason}"
+            );
+        }
+        PolicyDecision::Allow { .. } => panic!("expected Deny"),
+    }
+    registry.cleanup().await;
+}
+
+#[tokio::test]
 async fn policy_denies_no_cert() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "api.example.com:443").await;
+    let pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
+        .await;
     let engine = registry.engine(EXT_OID);
     let ctx = RequestContext {
         peer_certificates: vec![],
@@ -239,8 +280,10 @@ async fn policy_denies_no_cert() {
 async fn policy_config_without_port_defaults_to_443() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "api.example.com").await;
     let pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&pki, &subject, "api.example.com")
+        .await;
     let engine = registry.engine(EXT_OID);
     assert_allow(eval(engine.as_ref(), &pki, "api.example.com:443").await);
     registry.cleanup().await;
@@ -250,8 +293,10 @@ async fn policy_config_without_port_defaults_to_443() {
 async fn policy_config_without_port_denies_non_443() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "api.example.com").await;
     let pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&pki, &subject, "api.example.com")
+        .await;
     let engine = registry.engine(EXT_OID);
     assert_deny(eval(engine.as_ref(), &pki, "api.example.com:8080").await);
     registry.cleanup().await;
@@ -263,8 +308,8 @@ async fn policy_config_without_port_denies_non_443() {
 async fn policy_ipv6_config_matches_bracketed_request() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "[::1]:8443").await;
     let pki = TestPki::new(&subject);
+    registry.allow_for_pki(&pki, &subject, "[::1]:8443").await;
     let engine = registry.engine(EXT_OID);
     assert_allow(eval(engine.as_ref(), &pki, "[::1]:8443").await);
     assert_deny(eval(engine.as_ref(), &pki, "[::1]:443").await);
@@ -275,8 +320,8 @@ async fn policy_ipv6_config_matches_bracketed_request() {
 async fn policy_bare_ipv6_config_matches_bracketed_request() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "::1").await;
     let pki = TestPki::new(&subject);
+    registry.allow_for_pki(&pki, &subject, "::1").await;
     let engine = registry.engine(EXT_OID);
     // bare "::1" in config normalizes to "[::1]:443", request "[::1]:443" should match
     assert_allow(eval(engine.as_ref(), &pki, "[::1]:443").await);
@@ -290,8 +335,10 @@ async fn policy_bare_ipv6_config_matches_bracketed_request() {
 async fn policy_destination_matching_is_case_insensitive() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "api.example.com:443").await;
     let pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
+        .await;
     let engine = registry.engine(EXT_OID);
     assert_allow(eval(engine.as_ref(), &pki, "API.EXAMPLE.COM:443").await);
     registry.cleanup().await;
@@ -301,11 +348,13 @@ async fn policy_destination_matching_is_case_insensitive() {
 async fn policy_denies_tampered_permission_destination() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    let permission = registry.allow(&subject, "api.example.com:443").await;
+    let pki = TestPki::new(&subject);
+    let permission = registry
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
+        .await;
     registry
         .tamper_permission_destination(&permission.permission_id, "evil.example.com:443")
         .await;
-    let pki = TestPki::new(&subject);
     let engine = registry.engine(EXT_OID);
     assert_deny(eval(engine.as_ref(), &pki, "evil.example.com:443").await);
     registry.cleanup().await;
@@ -315,11 +364,25 @@ async fn policy_denies_tampered_permission_destination() {
 async fn policy_denies_revoked_permission() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    let permission = registry.allow(&subject, "api.example.com:443").await;
-    registry.revoke_permission(&permission.permission_id).await;
     let pki = TestPki::new(&subject);
+    let permission = registry
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
+        .await;
+    registry.revoke_permission(&permission.permission_id).await;
     let engine = registry.engine(EXT_OID);
-    assert_deny(eval(engine.as_ref(), &pki, "api.example.com:443").await);
+    match eval(engine.as_ref(), &pki, "api.example.com:443").await {
+        PolicyDecision::Deny {
+            source_identity,
+            reason,
+        } => {
+            assert_eq!(source_identity.as_deref(), Some(subject.as_str()));
+            assert!(
+                reason.contains("no active signed permission"),
+                "denial should be caused by revoked permission, got: {reason}"
+            );
+        }
+        PolicyDecision::Allow { .. } => panic!("expected Deny"),
+    }
     registry.cleanup().await;
 }
 
@@ -327,11 +390,25 @@ async fn policy_denies_revoked_permission() {
 async fn policy_denies_revoked_signer() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "api.example.com:443").await;
-    registry.revoke_signer().await;
     let pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
+        .await;
+    registry.revoke_signer().await;
     let engine = registry.engine(EXT_OID);
-    assert_deny(eval(engine.as_ref(), &pki, "api.example.com:443").await);
+    match eval(engine.as_ref(), &pki, "api.example.com:443").await {
+        PolicyDecision::Deny {
+            source_identity,
+            reason,
+        } => {
+            assert_eq!(source_identity.as_deref(), Some(subject.as_str()));
+            assert!(
+                reason.contains("is not active"),
+                "denial should be caused by inactive signer, got: {reason}"
+            );
+        }
+        PolicyDecision::Allow { .. } => panic!("expected Deny"),
+    }
     registry.cleanup().await;
 }
 
@@ -339,10 +416,10 @@ async fn policy_denies_revoked_signer() {
 async fn policy_denies_signer_scope_violation() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry
-        .allow_without_signer_scope(&subject, "api.example.com:443")
-        .await;
     let pki = TestPki::new(&subject);
+    registry
+        .allow_without_signer_scope_for_pki(&pki, &subject, "api.example.com:443")
+        .await;
     let engine = registry.engine(EXT_OID);
     assert_deny(eval(engine.as_ref(), &pki, "api.example.com:443").await);
     registry.cleanup().await;
@@ -361,11 +438,8 @@ fn test_pki_generates_valid_mtls_config() {
     let mut ca_store = RootCertStore::empty();
     ca_store.add(pki.ca_cert_der()).unwrap();
 
-    let client_verifier = WebPkiClientVerifier::builder(Arc::new(ca_store.clone()))
-        .build()
-        .unwrap();
     let _server_config = ServerConfig::builder()
-        .with_client_cert_verifier(client_verifier)
+        .with_client_cert_verifier(agent_gateway::tls::db_rooted_client_cert_verifier())
         .with_single_cert(pki.server_cert_chain(), pki.server_key_der())
         .unwrap();
 
@@ -373,6 +447,62 @@ fn test_pki_generates_valid_mtls_config() {
         .with_root_certificates(ca_store)
         .with_client_auth_cert(pki.client_cert_chain(), pki.client_key_der())
         .unwrap();
+}
+
+#[test]
+fn openssl_spki_extraction_matches_gateway_parser() {
+    if Command::new("openssl").arg("version").output().is_err() {
+        return;
+    }
+
+    let pki = TestPki::new("agent-alpha");
+    let cert_der = pki.client_cert.der().to_vec();
+    let expected = certificate_spki_der(&cert_der);
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent-gateway-spki-test-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let cert_path = temp_dir.join("client.der");
+    std::fs::write(&cert_path, cert_der).unwrap();
+
+    let pubkey = Command::new("openssl")
+        .args(["x509", "-inform", "DER", "-in"])
+        .arg(&cert_path)
+        .args(["-pubkey", "-noout"])
+        .output()
+        .expect("run openssl x509");
+    assert!(
+        pubkey.status.success(),
+        "openssl x509 failed: {}",
+        String::from_utf8_lossy(&pubkey.stderr)
+    );
+
+    let mut pkey = Command::new("openssl")
+        .args(["pkey", "-pubin", "-outform", "DER"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run openssl pkey");
+    pkey.stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&pubkey.stdout)
+        .unwrap();
+    let output = pkey.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "openssl pkey failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, expected);
+
+    let _ = std::fs::remove_dir_all(temp_dir);
 }
 
 // ---- Config validation ----
@@ -384,7 +514,6 @@ fn config_validates_oid() {
 listen_addr = "0.0.0.0:8443"
 tls_cert_path = "c.pem"
 tls_key_path = "k.pem"
-client_ca_path = "ca.pem"
 
 [observability]
 log_level = "info"
@@ -409,7 +538,6 @@ fn config_requires_exactly_one_database_url_source() {
 listen_addr = "0.0.0.0:8443"
 tls_cert_path = "c.pem"
 tls_key_path = "k.pem"
-client_ca_path = "ca.pem"
 
 [observability]
 log_level = "info"
@@ -438,13 +566,39 @@ client_ext_oid = "1.3.6.1.4.1.57264.1.1"
 }
 
 #[test]
-fn config_rejects_removed_policy_rules() {
+fn config_rejects_removed_client_ca_path() {
     let toml = r#"
 [server]
 listen_addr = "0.0.0.0:8443"
 tls_cert_path = "c.pem"
 tls_key_path = "k.pem"
 client_ca_path = "ca.pem"
+
+[observability]
+log_level = "info"
+
+[policy]
+client_ext_oid = "1.3.6.1.4.1.57264.1.1"
+database_url = "postgres://example.invalid/agent_gateway"
+"#;
+    let tmpdir = std::env::temp_dir().join("agent_gw_test_config");
+    std::fs::create_dir_all(&tmpdir).ok();
+    let path = tmpdir.join("reject_client_ca_path.toml");
+    std::fs::write(&path, toml).unwrap();
+    let result = agent_gateway::config::Config::load(&path);
+    assert!(
+        result.is_err(),
+        "client_ca_path should be rejected as an unknown field"
+    );
+}
+
+#[test]
+fn config_rejects_removed_policy_rules() {
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0:8443"
+tls_cert_path = "c.pem"
+tls_key_path = "k.pem"
 
 [observability]
 log_level = "info"
@@ -471,7 +625,6 @@ fn config_rejects_removed_metrics_bind_field() {
 listen_addr = "0.0.0.0:8443"
 tls_cert_path = "c.pem"
 tls_key_path = "k.pem"
-client_ca_path = "ca.pem"
 
 [observability]
 log_level = "info"
@@ -557,8 +710,8 @@ fn proxy_dest_ipv6_full_address() {
 async fn proxy_dest_ipv6_matches_policy() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
-    registry.allow(&subject, "[::1]:8443").await;
     let pki = TestPki::new(&subject);
+    registry.allow_for_pki(&pki, &subject, "[::1]:8443").await;
     let engine = registry.engine(EXT_OID);
 
     // Simulate what proxy.rs produces for a CONNECT [::1]:8443 request

@@ -34,6 +34,7 @@ CREATE TABLE permission_registry (
     permission_id TEXT PRIMARY KEY,
     signing_key_id TEXT NOT NULL REFERENCES principal_signing_keys(key_id),
     subject_identity TEXT NOT NULL CHECK (subject_identity <> ''),
+    subject_public_key_spki_der BYTEA NOT NULL,
     destination TEXT NOT NULL CHECK (destination <> ''),
     not_before TIMESTAMPTZ NOT NULL,
     not_after TIMESTAMPTZ NOT NULL,
@@ -46,7 +47,7 @@ CREATE TABLE permission_registry (
 );
 
 CREATE INDEX permission_registry_active_lookup_idx
-    ON permission_registry (subject_identity, destination, not_after DESC)
+    ON permission_registry (subject_identity, destination, subject_public_key_spki_der, not_after DESC)
     WHERE revoked_at IS NULL;
 
 CREATE INDEX principal_key_permissions_active_scope_idx

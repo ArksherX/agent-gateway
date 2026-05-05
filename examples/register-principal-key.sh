@@ -11,7 +11,13 @@ usage() {
   echo "  TPM2_PKCS11_MODULE may override libtpm2_pkcs11.so discovery." >&2
   echo "  AGENT_GATEWAY_TPM_TOKEN_LABEL defaults to agent-gateway." >&2
   echo "  AGENT_GATEWAY_TPM_USER_PIN and AGENT_GATEWAY_TPM_SO_PIN avoid PIN prompts." >&2
+  echo "  AGENT_GATEWAY_RESET_TPM_STORE=true recreates the local tpm2-pkcs11 store." >&2
 }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
   usage
@@ -23,9 +29,9 @@ VALID_DAYS="${2:-365}"
 DATABASE_URL="${AGENT_GATEWAY_DATABASE_URL:-${DATABASE_URL:-}}"
 TPM2_PKCS11_STORE="${TPM2_PKCS11_STORE:-$HOME/.tpm2_pkcs11}"
 TOKEN_LABEL="${AGENT_GATEWAY_TPM_TOKEN_LABEL:-agent-gateway}"
-PRIMARY_ID="${AGENT_GATEWAY_TPM_PRIMARY_ID:-}"
 USER_PIN="${AGENT_GATEWAY_TPM_USER_PIN:-}"
 SO_PIN="${AGENT_GATEWAY_TPM_SO_PIN:-}"
+RESET_TPM_STORE="${AGENT_GATEWAY_RESET_TPM_STORE:-false}"
 export TPM2_PKCS11_STORE
 
 if [[ -z "$DATABASE_URL" ]]; then
@@ -98,6 +104,22 @@ run_tpm2_ptool() {
   fi
 }
 
+filter_tpm2_ptool_stderr() {
+  grep -v \
+    -e 'CryptographyDeprecationWarning:' \
+    -e 'from cryptography\.hazmat\.primitives\.ciphers\.' \
+    -e '^[[:space:]]*(TPM2_ALG\.CFB, modes\.CFB),'
+}
+
+run_tpm2_ptool_quiet() {
+  local warnings_filter="ignore::DeprecationWarning"
+  if [[ -n "${PYTHONWARNINGS:-}" ]]; then
+    PYTHONWARNINGS="${PYTHONWARNINGS},${warnings_filter}" tpm2_ptool "$@" 2> >(filter_tpm2_ptool_stderr >/dev/null)
+  else
+    PYTHONWARNINGS="$warnings_filter" tpm2_ptool "$@" 2> >(filter_tpm2_ptool_stderr >/dev/null)
+  fi
+}
+
 run_pkcs11_tool() {
   pkcs11-tool "$@" 2> >(
     grep -v \
@@ -110,20 +132,11 @@ run_pkcs11_tool() {
   )
 }
 
-PKCS11_MODULE="$(discover_pkcs11_module)"
-
-if [[ -z "$USER_PIN" ]]; then
-  USER_PIN="$(prompt_secret "TPM token user PIN: ")"
-fi
-
-mkdir -p "$TPM2_PKCS11_STORE"
-
-if ! run_pkcs11_tool --module "$PKCS11_MODULE" --token-label "$TOKEN_LABEL" --list-objects >/dev/null 2>&1; then
-  if [[ -z "$PRIMARY_ID" ]]; then
-    init_output="$(run_tpm2_ptool init --path "$TPM2_PKCS11_STORE")"
-    PRIMARY_ID="$(printf '%s\n' "$init_output" | awk -F': *' '$1 == "id" { print $2; exit }')"
-  fi
-  if [[ -z "$PRIMARY_ID" ]]; then
+create_token() {
+  local init_output primary_id
+  init_output="$(run_tpm2_ptool init --path "$TPM2_PKCS11_STORE")"
+  primary_id="$(printf '%s\n' "$init_output" | awk -F': *' '$1 == "id" { print $2; exit }')"
+  if [[ -z "$primary_id" ]]; then
     echo "Could not determine tpm2-pkcs11 primary id from tpm2_ptool init output" >&2
     exit 1
   fi
@@ -132,11 +145,52 @@ if ! run_pkcs11_tool --module "$PKCS11_MODULE" --token-label "$TOKEN_LABEL" --li
   fi
   run_tpm2_ptool addtoken \
     --path "$TPM2_PKCS11_STORE" \
-    --pid "$PRIMARY_ID" \
+    --pid "$primary_id" \
     --sopin "$SO_PIN" \
     --userpin "$USER_PIN" \
     --label "$TOKEN_LABEL"
+}
+
+reset_store() {
+  local backup
+  backup="${TPM2_PKCS11_STORE}.stale.$(date +%Y%m%d%H%M%S)"
+  if [[ -e "$TPM2_PKCS11_STORE" ]]; then
+    mv "$TPM2_PKCS11_STORE" "$backup"
+    echo "Moved stale tpm2-pkcs11 store to $backup" >&2
+  fi
+  mkdir -p "$TPM2_PKCS11_STORE"
+  create_token
+}
+
+ensure_token() {
+  if [[ "$RESET_TPM_STORE" == "true" ]]; then
+    reset_store
+    return
+  fi
+
+  mkdir -p "$TPM2_PKCS11_STORE"
+  if ! run_pkcs11_tool --module "$PKCS11_MODULE" --token-label "$TOKEN_LABEL" --list-objects >/dev/null 2>&1; then
+    create_token
+  fi
+}
+
+add_key() {
+  local runner="${1:-run_tpm2_ptool}"
+  "$runner" addkey \
+    --path "$TPM2_PKCS11_STORE" \
+    --label "$TOKEN_LABEL" \
+    --userpin "$USER_PIN" \
+    --algorithm ecc256 \
+    --key-label "$KEY_ID"
+}
+
+PKCS11_MODULE="$(discover_pkcs11_module)"
+
+if [[ -z "$USER_PIN" ]]; then
+  USER_PIN="$(prompt_secret "TPM token user PIN: ")"
 fi
+
+ensure_token
 
 if ! run_pkcs11_tool \
   --module "$PKCS11_MODULE" \
@@ -147,12 +201,11 @@ if ! run_pkcs11_tool \
   --type pubkey \
   --label "$KEY_ID" \
   --output-file "$public_der" >/dev/null 2>&1; then
-  run_tpm2_ptool addkey \
-    --path "$TPM2_PKCS11_STORE" \
-    --label "$TOKEN_LABEL" \
-    --userpin "$USER_PIN" \
-    --algorithm ecc256 \
-    --key-label "$KEY_ID"
+  if ! add_key run_tpm2_ptool_quiet; then
+    echo "Could not add TPM key with the existing local tpm2-pkcs11 store; recreating it and retrying once." >&2
+    reset_store
+    add_key
+  fi
 
   run_pkcs11_tool \
     --module "$PKCS11_MODULE" \

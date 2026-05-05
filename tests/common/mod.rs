@@ -11,11 +11,11 @@ use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, CustomExtension, DistinguishedName,
     DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
 };
-use rustls::server::WebPkiClientVerifier;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use sqlx::postgres::PgPoolOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use x509_parser::prelude::*;
 
 use agent_gateway::policy::{PolicyEngine, PostgresPolicyEngine};
 use agent_gateway::proxy::MakeProxyService;
@@ -147,6 +147,19 @@ impl TestPki {
     pub fn client_key_der(&self) -> PrivateKeyDer<'static> {
         PrivateKeyDer::from(PrivatePkcs8KeyDer::from(self.client_key.serialize_der()))
     }
+
+    pub fn client_spki_der(&self) -> Vec<u8> {
+        certificate_spki_der(&self.client_cert.der().to_vec())
+    }
+}
+
+pub fn certificate_spki_der(cert_der: &[u8]) -> Vec<u8> {
+    let (remaining, cert) = X509Certificate::from_der(cert_der).expect("parse certificate");
+    assert!(
+        remaining.is_empty(),
+        "certificate should not contain trailing bytes"
+    );
+    cert.tbs_certificate.subject_pki.raw.to_vec()
 }
 
 fn der_encode_utf8_string(value: &str) -> Vec<u8> {
@@ -418,16 +431,56 @@ impl TestAuthzRegistry {
             .expect("delete test signing key");
     }
 
-    pub async fn allow(&self, subject_identity: &str, destination: &str) -> SeededPermission {
-        self.allow_inner(subject_identity, destination, true).await
+    pub async fn allow(
+        &self,
+        subject_identity: &str,
+        subject_public_key_spki_der: &[u8],
+        destination: &str,
+    ) -> SeededPermission {
+        self.allow_inner(
+            subject_identity,
+            subject_public_key_spki_der,
+            destination,
+            true,
+        )
+        .await
+    }
+
+    pub async fn allow_for_pki(
+        &self,
+        pki: &TestPki,
+        subject_identity: &str,
+        destination: &str,
+    ) -> SeededPermission {
+        let subject_public_key_spki_der = pki.client_spki_der();
+        self.allow(subject_identity, &subject_public_key_spki_der, destination)
+            .await
     }
 
     pub async fn allow_without_signer_scope(
         &self,
         subject_identity: &str,
+        subject_public_key_spki_der: &[u8],
         destination: &str,
     ) -> SeededPermission {
-        self.allow_inner(subject_identity, destination, false).await
+        self.allow_inner(
+            subject_identity,
+            subject_public_key_spki_der,
+            destination,
+            false,
+        )
+        .await
+    }
+
+    pub async fn allow_without_signer_scope_for_pki(
+        &self,
+        pki: &TestPki,
+        subject_identity: &str,
+        destination: &str,
+    ) -> SeededPermission {
+        let subject_public_key_spki_der = pki.client_spki_der();
+        self.allow_without_signer_scope(subject_identity, &subject_public_key_spki_der, destination)
+            .await
     }
 
     pub async fn revoke_permission(&self, permission_id: &str) {
@@ -460,6 +513,7 @@ impl TestAuthzRegistry {
     async fn allow_inner(
         &self,
         subject_identity: &str,
+        subject_public_key_spki_der: &[u8],
         destination: &str,
         include_scope: bool,
     ) -> SeededPermission {
@@ -490,6 +544,7 @@ impl TestAuthzRegistry {
             &permission_id,
             &self.key_id,
             subject_identity,
+            subject_public_key_spki_der,
             &normalized_destination,
             not_before,
             not_after,
@@ -499,15 +554,16 @@ impl TestAuthzRegistry {
         sqlx::query(
             r#"
             INSERT INTO permission_registry (
-                permission_id, signing_key_id, subject_identity, destination,
+                permission_id, signing_key_id, subject_identity, subject_public_key_spki_der, destination,
                 not_before, not_after, signature
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(&permission_id)
         .bind(&self.key_id)
         .bind(subject_identity)
+        .bind(subject_public_key_spki_der)
         .bind(&normalized_destination)
         .bind(not_before)
         .bind(not_after)
@@ -540,12 +596,16 @@ impl TestPolicyEngine {
 
 pub async fn postgres_engine_allowing(
     client_ext_oid: &str,
+    pki: &TestPki,
     subject_identity: &str,
     destinations: Vec<String>,
 ) -> TestPolicyEngine {
     let registry = TestAuthzRegistry::new().await;
+    let subject_public_key_spki_der = pki.client_spki_der();
     for destination in destinations {
-        registry.allow(subject_identity, &destination).await;
+        registry
+            .allow(subject_identity, &subject_public_key_spki_der, &destination)
+            .await;
     }
     let engine = registry.engine(client_ext_oid);
     TestPolicyEngine { engine, registry }
@@ -577,16 +637,28 @@ fn test_canonical_permission_bytes(
     permission_id: &str,
     signing_key_id: &str,
     subject_identity: &str,
+    subject_public_key_spki_der: &[u8],
     destination: &str,
     not_before: DateTime<Utc>,
     not_after: DateTime<Utc>,
 ) -> Vec<u8> {
     format!(
-        "agent-gateway-permission-v1\npermission_id={permission_id}\nsigning_key_id={signing_key_id}\nsubject_identity={subject_identity}\ndestination={destination}\nnot_before={}\nnot_after={}\n",
+        "agent-gateway-permission-v1\npermission_id={permission_id}\nsigning_key_id={signing_key_id}\nsubject_identity={subject_identity}\nsubject_public_key_spki_der={}\ndestination={destination}\nnot_before={}\nnot_after={}\n",
+        lower_hex(subject_public_key_spki_der),
         not_before.to_rfc3339_opts(SecondsFormat::Micros, true),
         not_after.to_rfc3339_opts(SecondsFormat::Micros, true),
     )
     .into_bytes()
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -612,15 +684,8 @@ pub async fn start_proxy(
 ) -> (SocketAddr, ServerGuard) {
     install_test_crypto_provider();
 
-    let mut ca_store = rustls::RootCertStore::empty();
-    ca_store.add(pki.ca_cert_der()).unwrap();
-
-    let client_verifier = WebPkiClientVerifier::builder(Arc::new(ca_store))
-        .build()
-        .unwrap();
-
     let mut server_config = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(client_verifier)
+        .with_client_cert_verifier(agent_gateway::tls::db_rooted_client_cert_verifier())
         .with_single_cert(pki.server_cert_chain(), pki.server_key_der())
         .unwrap();
     server_config.alpn_protocols = vec![b"h2".to_vec()];

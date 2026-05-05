@@ -18,6 +18,7 @@ pub struct RegistryStore {
 pub struct CandidatePermission {
     pub permission_id: String,
     pub subject_identity: String,
+    pub subject_public_key_spki_der: Vec<u8>,
     pub destination: String,
     pub signing_key_id: String,
     pub permission_not_before: DateTime<Utc>,
@@ -65,12 +66,14 @@ impl RegistryStore {
         &self,
         subject_identity: &str,
         destination: &str,
+        subject_public_key_spki_der: &[u8],
     ) -> anyhow::Result<Vec<CandidatePermission>> {
         let query = sqlx::query_as::<_, CandidatePermission>(
             r#"
             SELECT
                 p.permission_id,
                 p.subject_identity,
+                p.subject_public_key_spki_der,
                 p.destination,
                 p.signing_key_id,
                 p.not_before AS permission_not_before,
@@ -90,6 +93,7 @@ impl RegistryStore {
             JOIN principal_signing_keys s ON s.key_id = p.signing_key_id
             WHERE p.subject_identity = $1
               AND p.destination = $2
+              AND p.subject_public_key_spki_der = $3
               AND p.revoked_at IS NULL
               AND p.not_before <= now()
               AND p.not_after > now()
@@ -98,7 +102,8 @@ impl RegistryStore {
             "#,
         )
         .bind(subject_identity)
-        .bind(destination);
+        .bind(destination)
+        .bind(subject_public_key_spki_der);
 
         tokio::time::timeout(self.query_timeout, query.fetch_all(&self.pool))
             .await

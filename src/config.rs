@@ -19,7 +19,6 @@ pub struct ServerConfig {
     pub listen_addr: String,
     pub tls_cert_path: PathBuf,
     pub tls_key_path: PathBuf,
-    pub client_ca_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]

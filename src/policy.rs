@@ -114,16 +114,16 @@ pub fn normalize_destination(dest: &str) -> anyhow::Result<String> {
 #[async_trait]
 impl PolicyEngine for PostgresPolicyEngine {
     async fn evaluate(&self, ctx: &RequestContext) -> PolicyDecision {
-        let source_identity =
-            match certificate_identity(&ctx.peer_certificates, &self.client_ext_oid) {
-                Ok(source_identity) => source_identity,
-                Err(reason) => {
-                    return PolicyDecision::Deny {
-                        source_identity: None,
-                        reason,
-                    };
-                }
-            };
+        let subject = match certificate_subject(&ctx.peer_certificates, &self.client_ext_oid) {
+            Ok(subject) => subject,
+            Err(reason) => {
+                return PolicyDecision::Deny {
+                    source_identity: None,
+                    reason,
+                };
+            }
+        };
+        let source_identity = subject.identity;
 
         let normalized_dest = match normalize_destination(&ctx.destination) {
             Ok(d) => d,
@@ -137,7 +137,11 @@ impl PolicyEngine for PostgresPolicyEngine {
 
         let candidates = match self
             .registry
-            .candidate_permissions(&source_identity, &normalized_dest)
+            .candidate_permissions(
+                &source_identity,
+                &normalized_dest,
+                &subject.public_key_spki_der,
+            )
             .await
         {
             Ok(candidates) => candidates,
@@ -213,10 +217,15 @@ impl PostgresPolicyEngine {
     }
 }
 
-pub fn certificate_identity(
+struct CertificateSubject {
+    identity: String,
+    public_key_spki_der: Vec<u8>,
+}
+
+fn certificate_subject(
     peer_certificates: &[CertificateDer<'static>],
     client_ext_oid: &Oid<'_>,
-) -> Result<String, String> {
+) -> Result<CertificateSubject, String> {
     // The leaf (end-entity) certificate is always first in the chain;
     // remaining entries are intermediates used for chain-of-trust validation.
     let Some(peer_cert_der) = peer_certificates.first() else {
@@ -224,9 +233,11 @@ pub fn certificate_identity(
     };
 
     let cert = match X509Certificate::from_der(peer_cert_der.as_ref()) {
-        Ok((_, cert)) => cert,
+        Ok(([], cert)) => cert,
+        Ok(_) => return Err("client certificate contains trailing bytes".into()),
         Err(e) => return Err(format!("failed to parse client certificate: {e}")),
     };
+    let public_key_spki_der = cert.tbs_certificate.subject_pki.raw.to_vec();
 
     let Some(ext) = cert
         .tbs_certificate
@@ -242,7 +253,10 @@ pub fn certificate_identity(
             if !remaining.is_empty() {
                 return Err("extension value contains trailing bytes".into());
             }
-            Ok(v.string().to_owned())
+            Ok(CertificateSubject {
+                identity: v.string().to_owned(),
+                public_key_spki_der,
+            })
         }
         Err(e) => Err(format!("failed to decode extension as UTF8String: {e}")),
     }
@@ -263,10 +277,11 @@ fn verify_signature(candidate: &CandidatePermission) -> anyhow::Result<()> {
 
 fn canonical_permission_bytes(candidate: &CandidatePermission) -> Vec<u8> {
     format!(
-        "agent-gateway-permission-v1\npermission_id={}\nsigning_key_id={}\nsubject_identity={}\ndestination={}\nnot_before={}\nnot_after={}\n",
+        "agent-gateway-permission-v1\npermission_id={}\nsigning_key_id={}\nsubject_identity={}\nsubject_public_key_spki_der={}\ndestination={}\nnot_before={}\nnot_after={}\n",
         candidate.permission_id,
         candidate.signing_key_id,
         candidate.subject_identity,
+        lower_hex(&candidate.subject_public_key_spki_der),
         candidate.destination,
         candidate
             .permission_not_before
@@ -276,6 +291,16 @@ fn canonical_permission_bytes(candidate: &CandidatePermission) -> Vec<u8> {
             .to_rfc3339_opts(SecondsFormat::Micros, true),
     )
     .into_bytes()
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -288,6 +313,7 @@ mod tests {
         let candidate = CandidatePermission {
             permission_id: "perm-1".to_owned(),
             subject_identity: "agent-alpha".to_owned(),
+            subject_public_key_spki_der: vec![0x30, 0x59, 0x01],
             destination: "api.example.com:443".to_owned(),
             signing_key_id: "org-alice".to_owned(),
             permission_not_before: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).single().unwrap(),
@@ -303,7 +329,7 @@ mod tests {
 
         assert_eq!(
             canonical_permission_bytes(&candidate),
-            b"agent-gateway-permission-v1\npermission_id=perm-1\nsigning_key_id=org-alice\nsubject_identity=agent-alpha\ndestination=api.example.com:443\nnot_before=2026-05-01T00:00:00.000000Z\nnot_after=2026-06-01T00:00:00.000000Z\n"
+            b"agent-gateway-permission-v1\npermission_id=perm-1\nsigning_key_id=org-alice\nsubject_identity=agent-alpha\nsubject_public_key_spki_der=305901\ndestination=api.example.com:443\nnot_before=2026-05-01T00:00:00.000000Z\nnot_after=2026-06-01T00:00:00.000000Z\n"
         );
     }
 }
