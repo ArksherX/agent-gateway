@@ -27,23 +27,23 @@ export AGENT_GATEWAY_DATABASE_URL=postgres://agent_gateway_admin:agent_gateway_d
 cargo run -- --config config.toml migrate
 ```
 
-`generate-certs.sh` only creates **server** TLS material (`server-ca.pem`, `server.pem`, ...). Each agent platform enrolls with `./examples/connect.sh`, which starts a local `swtpm`, creates a persistent P-256 signing key in that simulated TPM, and issues `machine-client.pem` for the TPM public key. The gateway needs the generated `machine-client-ca.pem` in `certs/client-ca-bundle.pem` before it can trust that sidecar.
+`generate-certs.sh` only creates **server** TLS material (`server-ca.pem`, `server.pem`, ...). Each agent platform enrolls with `./examples/demo-agent.sh`, which starts a local `swtpm`, creates a persistent P-256 signing key in that simulated TPM, and prepares `machine-client.pem` as a certificate carrier for that public key and identity extension. The gateway does not trust a client CA bundle; it authorizes the exact subject public key recorded in signed Postgres permission rows.
 
 Typical first-time flow:
 
 1. `./examples/generate-certs.sh` and `cp config.example.toml config.toml`.
-2. `./examples/connect.sh --gateway 127.0.0.1:8443 --gateway-ca certs/server-ca.pem` creates `machine-client-ca.pem` under `~/.local/share/agent-gateway/` (or `$XDG_DATA_HOME`). Append that file to `client_ca_path` (for example, `cat ~/.local/share/agent-gateway/machine-client-ca.pem >> certs/client-ca-bundle.pem`).
-3. Insert a trusted principal signing key, its delegation scope, and signed permission rows into Postgres.
-4. Start the gateway (`cargo run -- --config config.toml`), then return to the terminal running `connect.sh` and press Enter to start the sidecar and Claude.
+2. Enroll a trusted principal signing key and grant its destination delegation scope.
+3. The principal creates an agent handle; the script prepares the subject certificate, signs permission rows for its exact SPKI DER, and starts the sidecar.
+4. Start the gateway (`cargo run -- --config config.toml`) before sending prompts through the sidecar.
 
-On later runs, start the gateway first, run `connect.sh`, and press Enter after confirming the machine CA is still registered. If `connect.sh` finds an existing simulated TPM key but the saved `machine-client.pem` was issued for a different public key, it reissues `machine-client.pem` for the current TPM key using the existing machine client CA. `--regenerate-certs` creates a fresh simulated TPM state and machine client CA, so the new CA must be appended to `client_ca_path`.
+On later runs, start the gateway first and use `demo-agent.sh prompt`. `connect.sh` prepares `machine-client.pem` for the current simulated TPM key and identity extension whenever it prepares or starts the sidecar. `--regenerate-certs` creates a fresh simulated TPM state; any permissions for the old subject key will no longer match.
 
-Pass a custom policy extension value: `connect.sh ... --extension-value agent-beta`. The extension value must match `permission_registry.subject_identity` in an active signed permission row.
+Pass a custom policy extension value: `connect.sh start-sidecar ... --extension-value agent-beta`. The extension value must match `permission_registry.subject_identity` in an active signed permission row.
 
-The simulated TPM state lives under `~/.local/share/agent-gateway/swtpm/` unless
-`XDG_DATA_HOME` is set. By default, the sidecar uses TCTI
-`swtpm:host=127.0.0.1,port=2321` and persistent handle `0x81010004`; override
-the handle or simulator data port with `connect.sh --tpm-handle` and
+The simulated TPM state lives under `$AGENT_STATE/client/swtpm/`. By default,
+the sidecar uses TCTI `swtpm:host=127.0.0.1,port=2321` and persistent handle
+`0x81010004`; override the handle or simulator data port with
+`connect.sh start-sidecar --tpm-handle` and
 `--swtpm-port`. The swtpm control port is always the data port plus one, which
 matches the TSS swtpm TCTI convention.
 
@@ -58,7 +58,6 @@ Copy `config.example.toml` to `config.toml` and edit it. Key sections:
 | `listen_addr` | yes | `host:port` to bind (e.g. `0.0.0.0:8443`) |
 | `tls_cert_path` | yes | PEM server certificate |
 | `tls_key_path` | yes | PEM private key for the server cert |
-| `client_ca_path` | yes | PEM bundle of per-machine client CAs (append each `machine-client-ca.pem`) |
 
 **`[policy]`** -- Configures the certificate identity extension and Postgres registry access.
 
@@ -111,13 +110,37 @@ Register a principal signing key from the TPM owner machine with:
 
 The script creates or reuses a non-exportable TPM-backed P-256 key through `tpm2_ptool` and PKCS#11, stores only the public key in `principal_signing_keys`, and uses the friendly `key_id` (`org-alice`, `org-bob`, etc.) for the registry row. Run it on the machine that owns the TPM, with `AGENT_GATEWAY_DATABASE_URL` or `DATABASE_URL` pointing at Postgres.
 
+For the demo, use three windows:
+
+```bash
+# Principal shell: enroll the principal TPM public key.
+./examples/register-principal-key.sh org-alice
+
+# Admin shell: grant destination delegation authority to that principal.
+./examples/grant-principal-scope.sh org-alice api.anthropic.com example.com
+
+# Principal shell: create a local agent handle with initial signed permissions.
+AGENT_HANDLE="$(./examples/demo-agent.sh create \
+  --identity agent-alpha \
+  --grant api.anthropic.com)"
+
+# Principal shell: send the first prompt through that agent.
+./examples/demo-agent.sh prompt "$AGENT_HANDLE" --prompt "test prompt"
+
+# Principal shell: grant another destination, then continue the same Claude session.
+./examples/demo-agent.sh grant "$AGENT_HANDLE" --grant example.com
+./examples/demo-agent.sh prompt "$AGENT_HANDLE" --prompt "now try the second destination"
+```
+
+The dashboard runs separately and observes Postgres plus OpenTelemetry. `demo-agent.sh` keeps gateway connection details out of the principal-facing command; set `AGENT_GATEWAY_DEMO_GATEWAY` and `AGENT_GATEWAY_DEMO_GATEWAY_CA` only when overriding the local defaults. `AGENT_GATEWAY_DEMO_GATEWAY_CA` is the CA for the gateway's server certificate, not a client trust root. The first prompt uses `claude -p`; later prompts for the same handle use `claude -c -p` from the handle's working directory.
+
 ## Authorization Registry
 
 The gateway authorizes a CONNECT only when all of these checks pass:
 
 1. The mTLS client certificate has the configured UTF8String identity extension.
 2. The requested authority normalizes to a `host:port` destination.
-3. Postgres contains an active `permission_registry` row for that identity and destination.
+3. Postgres contains an active `permission_registry` row for that identity, destination, and the leaf certificate's exact SubjectPublicKeyInfo DER.
 4. The row's `signature` verifies over the canonical permission row fields with the referenced active principal signing key.
 5. `principal_key_permissions` confirms that the signing key was allowed to delegate that destination.
 
@@ -129,7 +152,7 @@ The authorization registry has three main tables:
 |---|---|---|
 | `principal_signing_keys` | `key_id`, `algorithm`, `public_key_spki_der`, `not_before`, `not_after`, `revoked_at` | Stores trusted P-256 public keys that may sign permissions. |
 | `principal_key_permissions` | `signing_key_id`, `destination`, `not_before`, `not_after`, `revoked_at` | Defines which destinations each signing key is allowed to delegate. |
-| `permission_registry` | `permission_id`, `signing_key_id`, `subject_identity`, `destination`, `not_before`, `not_after`, `revoked_at`, `signature` | Stores signed permissions that authorize a subject identity to reach a normalized destination. |
+| `permission_registry` | `permission_id`, `signing_key_id`, `subject_identity`, `subject_public_key_spki_der`, `destination`, `not_before`, `not_after`, `revoked_at`, `signature` | Stores signed permissions that authorize a subject identity and exact subject key to reach a normalized destination. |
 
 `principal_key_permissions.signing_key_id` and `permission_registry.signing_key_id` both reference `principal_signing_keys.key_id`. A permission is usable only when the permission row is active, the signing key is active, the signature verifies over the canonical row fields, and the signing key has a matching destination delegation row.
 
@@ -140,6 +163,7 @@ agent-gateway-permission-v1
 permission_id=perm-1
 signing_key_id=org-alice
 subject_identity=agent-alpha
+subject_public_key_spki_der=3059301306072a8648ce3d020106082a8648ce3d03010703420004...
 destination=api.example.com:443
 not_before=2026-05-01T00:00:00.000000Z
 not_after=2026-06-01T00:00:00.000000Z
@@ -151,7 +175,7 @@ Destination strings are normalized with the same rules used for CONNECT requests
 
 Clients must:
 
-1. **Connect over HTTP/2 with mTLS.** Present a client certificate signed by the CA specified in `client_ca_path`. The certificate must contain a custom X.509 extension at the OID configured in `policy.client_ext_oid`, with a DER-encoded UTF8String value.
+1. **Connect over HTTP/2 with mTLS.** Present a structurally valid client certificate and prove possession of the certificate private key during the TLS handshake. The certificate must contain a custom X.509 extension at the OID configured in `policy.client_ext_oid`, with a DER-encoded UTF8String value. The full leaf SubjectPublicKeyInfo DER must match an active signed permission row.
 
 2. **Use the HTTP CONNECT method.** The request authority must be `host:port` (port defaults to 443 if omitted). Example using `hyper`:
 

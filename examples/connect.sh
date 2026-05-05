@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Per-machine client certs → $XDG_DATA_HOME/.../agent-gateway; then sidecar + claude. Dev: --gateway-ca certs/server-ca.pem
+# Starts a persistent local sidecar backed by a simulated TPM, or runs Claude through it.
 
 set -euo pipefail
 
@@ -9,25 +9,44 @@ SIDECAR_BIN=""
 REGENERATE_CERTS=false
 GATEWAY=""
 GATEWAY_CA=""
+PROMPT=""
+STATE_DIR=""
+WORK_DIR=""
 TPM_HANDLE="0x81010004"
 SWTPM_HOST="127.0.0.1"
 SWTPM_PORT="2321"
+COMMAND=""
 
 usage() {
     cat <<'EOF'
-Usage: connect.sh [OPTIONS]
+Usage:
+  connect.sh prepare-client --state-dir PATH [OPTIONS]
+  connect.sh start-sidecar --state-dir PATH [OPTIONS]
+  connect.sh prompt --state-dir PATH --prompt TEXT [--work-dir PATH]
 
 Required:
-  --gateway HOST:PORT Gateway address
-  --gateway-ca PATH CA that issued tls_cert_path (dev: certs/server-ca.pem)
+  prepare-client: --state-dir PATH
+  start-sidecar: --state-dir PATH --gateway HOST:PORT --gateway-ca PATH
+  prompt:        --state-dir PATH --prompt TEXT
 
-Optional:
+prepare-client options:
+  --extension-value VALUE  (default: agent-alpha)
+  --tpm-handle HANDLE      Persistent simulated TPM handle (default: 0x81010004)
+  --swtpm-port PORT        swtpm server TCP port (default: 2321)
+  --regenerate-certs
+
+start-sidecar options:
   --extension-value VALUE  (default: agent-alpha)
   --listen ADDR:PORT
   --sidecar-bin PATH
   --tpm-handle HANDLE      Persistent simulated TPM handle (default: 0x81010004)
   --swtpm-port PORT        swtpm server TCP port (default: 2321)
   --regenerate-certs
+
+prompt options:
+  --work-dir PATH
+
+General:
   -h, --help
 EOF
     exit "${1:-0}"
@@ -35,30 +54,78 @@ EOF
 
 need_arg() { [[ $# -ge 2 ]] || { echo "error: $1 requires a value" >&2; exit 1; }; }
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --gateway)          need_arg "$@"; GATEWAY="$2"; shift 2 ;;
-        --gateway-ca)       need_arg "$@"; GATEWAY_CA="$2"; shift 2 ;;
-        --extension-value)  need_arg "$@"; EXTENSION_VALUE="$2"; shift 2 ;;
-        --listen)           need_arg "$@"; LISTEN="$2"; shift 2 ;;
-        --sidecar-bin)      need_arg "$@"; SIDECAR_BIN="$2"; shift 2 ;;
-        --tpm-handle)       need_arg "$@"; TPM_HANDLE="$2"; shift 2 ;;
-        --swtpm-port)       need_arg "$@"; SWTPM_PORT="$2"; shift 2 ;;
-        --regenerate-certs) REGENERATE_CERTS=true; shift ;;
-        -h|--help)          usage 0 ;;
-        *)                  echo "Unknown option: $1" >&2; usage 1 ;;
-    esac
-done
+[[ $# -gt 0 ]] || usage 1
+COMMAND="$1"
+shift
 
-[[ -n "$GATEWAY" ]]    || { echo "error: --gateway is required" >&2; usage 1; }
-[[ -n "$GATEWAY_CA" ]] || { echo "error: --gateway-ca is required" >&2; usage 1; }
-[[ -f "$GATEWAY_CA" ]] || { echo "error: gateway CA file not found: $GATEWAY_CA" >&2; exit 1; }
+case "$COMMAND" in
+    prepare-client)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --extension-value)  need_arg "$@"; EXTENSION_VALUE="$2"; shift 2 ;;
+                --state-dir)        need_arg "$@"; STATE_DIR="$2"; shift 2 ;;
+                --tpm-handle)       need_arg "$@"; TPM_HANDLE="$2"; shift 2 ;;
+                --swtpm-port)       need_arg "$@"; SWTPM_PORT="$2"; shift 2 ;;
+                --regenerate-certs) REGENERATE_CERTS=true; shift ;;
+                -h|--help)          usage 0 ;;
+                *)                  echo "Unknown prepare-client option: $1" >&2; usage 1 ;;
+            esac
+        done
 
-CERT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/agent-gateway"
-SWTPM_DIR="$CERT_DIR/swtpm"
-SWTPM_CTRL_PORT=$((SWTPM_PORT + 1))
-TPM_TCTI="swtpm:host=$SWTPM_HOST,port=$SWTPM_PORT"
-mkdir -p "$CERT_DIR"
+        [[ -n "$STATE_DIR" ]]  || { echo "error: prepare-client requires --state-dir" >&2; usage 1; }
+        ;;
+    start-sidecar)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --gateway)          need_arg "$@"; GATEWAY="$2"; shift 2 ;;
+                --gateway-ca)       need_arg "$@"; GATEWAY_CA="$2"; shift 2 ;;
+                --extension-value)  need_arg "$@"; EXTENSION_VALUE="$2"; shift 2 ;;
+                --listen)           need_arg "$@"; LISTEN="$2"; shift 2 ;;
+                --sidecar-bin)      need_arg "$@"; SIDECAR_BIN="$2"; shift 2 ;;
+                --state-dir)        need_arg "$@"; STATE_DIR="$2"; shift 2 ;;
+                --tpm-handle)       need_arg "$@"; TPM_HANDLE="$2"; shift 2 ;;
+                --swtpm-port)       need_arg "$@"; SWTPM_PORT="$2"; shift 2 ;;
+                --regenerate-certs) REGENERATE_CERTS=true; shift ;;
+                -h|--help)          usage 0 ;;
+                *)                  echo "Unknown start-sidecar option: $1" >&2; usage 1 ;;
+            esac
+        done
+
+        [[ -n "$STATE_DIR" ]]  || { echo "error: start-sidecar requires --state-dir" >&2; usage 1; }
+        [[ -n "$GATEWAY" ]]    || { echo "error: --gateway is required" >&2; usage 1; }
+        [[ -n "$GATEWAY_CA" ]] || { echo "error: --gateway-ca is required" >&2; usage 1; }
+        [[ -f "$GATEWAY_CA" ]] || { echo "error: gateway CA file not found: $GATEWAY_CA" >&2; exit 1; }
+        ;;
+    prompt)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --state-dir) need_arg "$@"; STATE_DIR="$2"; shift 2 ;;
+                --work-dir)  need_arg "$@"; WORK_DIR="$2"; shift 2 ;;
+                --prompt)    need_arg "$@"; PROMPT="$2"; shift 2 ;;
+                -h|--help)   usage 0 ;;
+                *)           echo "Unknown prompt option: $1" >&2; usage 1 ;;
+            esac
+        done
+
+        [[ -n "$STATE_DIR" ]] || { echo "error: prompt requires --state-dir" >&2; usage 1; }
+        [[ -n "$PROMPT" ]] || { echo "error: prompt requires --prompt" >&2; usage 1; }
+        ;;
+    -h|--help)
+        usage 0
+        ;;
+    *)
+        echo "Unknown command: $COMMAND" >&2
+        usage 1
+        ;;
+esac
+
+if [[ "$COMMAND" != "prompt" ]]; then
+    CERT_DIR="$STATE_DIR/client"
+    SWTPM_DIR="$CERT_DIR/swtpm"
+    SWTPM_CTRL_PORT=$((SWTPM_PORT + 1))
+    TPM_TCTI="swtpm:host=$SWTPM_HOST,port=$SWTPM_PORT"
+    mkdir -p "$CERT_DIR"
+fi
 
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -67,9 +134,11 @@ require_cmd() {
     }
 }
 
-for cmd in openssl swtpm tpm2_createprimary tpm2_evictcontrol tpm2_readpublic; do
-    require_cmd "$cmd"
-done
+if [[ "$COMMAND" != "prompt" ]]; then
+    for cmd in openssl swtpm tpm2_createprimary tpm2_evictcontrol tpm2_readpublic; do
+        require_cmd "$cmd"
+    done
+fi
 
 tpm2() {
     TPM2TOOLS_TCTI="$TPM_TCTI" "$@"
@@ -87,14 +156,15 @@ der_utf8string() {
 }
 
 generate_certs() {
-    if [[ ! -f "$CERT_DIR/machine-client-ca.pem" || ! -f "$CERT_DIR/machine-client-ca-key.pem" ]]; then
-        echo "==> Generating per-machine client CA"
+    if [[ ! -f "$CERT_DIR/machine-client-cert-signer-key.pem" ]]; then
+        echo "==> Generating local certificate signer key"
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-            -keyout "$CERT_DIR/machine-client-ca-key.pem" -out "$CERT_DIR/machine-client-ca.pem" \
-            -days 365 -nodes -subj "/CN=agent-gateway machine client CA" 2>/dev/null
+            -keyout "$CERT_DIR/machine-client-cert-signer-key.pem" \
+            -out "$CERT_DIR/machine-client-cert-signer.pem" \
+            -days 365 -nodes -subj "/CN=agent-gateway local cert signer" 2>/dev/null
     fi
 
-    echo "==> Issuing machine client certificate for simulated TPM key (extension_value=$EXTENSION_VALUE)"
+    echo "==> Preparing subject client certificate for simulated TPM key (extension_value=$EXTENSION_VALUE)"
     local der_hex
     der_hex=$(der_utf8string "$EXTENSION_VALUE")
     local extfile="$CERT_DIR/machine-client.ext"
@@ -105,22 +175,56 @@ generate_certs() {
     } > "$extfile"
     openssl x509 -new -force_pubkey "$CERT_DIR/machine-client-public.pem" \
         -subj "/CN=machine-client" \
-        -CA "$CERT_DIR/machine-client-ca.pem" -CAkey "$CERT_DIR/machine-client-ca-key.pem" -CAcreateserial \
+        -key "$CERT_DIR/machine-client-cert-signer-key.pem" \
         -out "$CERT_DIR/machine-client.pem" -days 365 -extfile "$extfile" 2>/dev/null
-    rm -f "$CERT_DIR/machine-client-ca.srl" "$extfile"
-}
-
-needs_certs() {
-    [[ "$REGENERATE_CERTS" == "true" ]] && return 0
-    for f in machine-client-ca.pem machine-client-ca-key.pem machine-client.pem machine-client-public.pem; do
-        [[ -f "$CERT_DIR/$f" ]] || return 0
-    done
-    return 1
+    rm -f "$extfile"
 }
 
 port_open() {
     (echo > "/dev/tcp/$1/$2") >/dev/null 2>&1
 }
+
+parse_listen_addr() {
+    local addr="$1"
+    if [[ "$addr" == \[* ]]; then
+        LISTEN_HOST="${addr%%\]:*}"
+        LISTEN_HOST="${LISTEN_HOST#\[}"
+        LISTEN_PORT="${addr##*\]:}"
+    else
+        LISTEN_HOST="${addr%:*}"
+        LISTEN_PORT="${addr##*:}"
+    fi
+}
+
+run_prompt() {
+    [[ -n "$STATE_DIR" ]] || { echo "error: --state-dir is required" >&2; exit 1; }
+    [[ -n "$PROMPT" ]] || { echo "error: --prompt is required" >&2; exit 1; }
+    require_cmd claude
+    local proxy_file="$STATE_DIR/proxy_url"
+    [[ -f "$proxy_file" ]] || { echo "error: sidecar state missing proxy_url: $proxy_file" >&2; exit 1; }
+
+    PROXY_URL="$(<"$proxy_file")"
+    WORK_DIR="${WORK_DIR:-$STATE_DIR/work}"
+    mkdir -p "$WORK_DIR"
+
+    if [[ -f "$STATE_DIR/claude_started" ]]; then
+        (
+            cd "$WORK_DIR"
+            HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" claude -c -p "$PROMPT"
+        )
+    else
+        (
+            cd "$WORK_DIR"
+            HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" claude -p "$PROMPT"
+        )
+        : > "$STATE_DIR/claude_started"
+    fi
+}
+
+if [[ "$COMMAND" == "prompt" ]]; then
+    run_prompt
+    exit 0
+fi
 
 SWTPM_PID=""
 SIDECAR_PID=""
@@ -141,12 +245,12 @@ start_swtpm() {
     fi
 
     echo "==> Starting swtpm at $TPM_TCTI"
-    swtpm socket \
+    nohup swtpm socket \
         --tpm2 \
         --tpmstate "dir=$SWTPM_DIR" \
         --server "type=tcp,bindaddr=$SWTPM_HOST,port=$SWTPM_PORT" \
         --ctrl "type=tcp,bindaddr=$SWTPM_HOST,port=$SWTPM_CTRL_PORT" \
-        --flags startup-clear &
+        --flags startup-clear > "$STATE_DIR/swtpm.log" 2>&1 &
     SWTPM_PID=$!
 
     for _ in $(seq 1 50); do
@@ -195,19 +299,29 @@ verify_cert_matches_tpm_key() {
     fi
 }
 
+write_subject_spki_der() {
+    openssl x509 -in "$CERT_DIR/machine-client.pem" -pubkey -noout \
+        | openssl pkey -pubin -outform DER > "$CERT_DIR/machine-client-spki.der"
+}
+
 start_swtpm
 ensure_tpm_key
 
-if needs_certs; then
-    generate_certs
-elif ! cert_matches_tpm_key; then
-    echo "==> Reissuing machine client certificate for simulated TPM key $TPM_HANDLE"
-    generate_certs
-fi
+generate_certs
 verify_cert_matches_tpm_key
+write_subject_spki_der
 
-echo "Append $CERT_DIR/machine-client-ca.pem to client_ca_path; restart gateway."
-read -r -p "Press Enter when done. " _
+mkdir -p "$STATE_DIR"
+printf '%s\n' "$CERT_DIR" > "$STATE_DIR/cert_dir"
+printf '%s\n' "$CERT_DIR/machine-client-spki.der" > "$STATE_DIR/subject_public_key_spki_der_path"
+if [[ -n "$SWTPM_PID" ]]; then
+    printf '%s\n' "$SWTPM_PID" > "$STATE_DIR/swtpm_pid"
+fi
+
+if [[ "$COMMAND" == "prepare-client" ]]; then
+    printf '%s\n' "$CERT_DIR/machine-client-spki.der"
+    exit 0
+fi
 
 find_sidecar() {
     if [[ -n "$SIDECAR_BIN" ]]; then
@@ -242,39 +356,14 @@ find_sidecar() {
 
 SIDECAR="$(find_sidecar)"
 
-cleanup() {
-    if [[ -n "$SIDECAR_PID" ]]; then
-        kill "$SIDECAR_PID" 2>/dev/null || true
-        wait "$SIDECAR_PID" 2>/dev/null || true
-    fi
-    if [[ -n "$SWTPM_PID" ]]; then
-        kill "$SWTPM_PID" 2>/dev/null || true
-        wait "$SWTPM_PID" 2>/dev/null || true
-    fi
-}
-
-trap cleanup EXIT
-
-"$SIDECAR" \
+nohup "$SIDECAR" \
     --listen "$LISTEN" \
     --gateway "$GATEWAY" \
     --client-cert "$CERT_DIR/machine-client.pem" \
     --tpm-tcti "$TPM_TCTI" \
     --tpm-key-handle "$TPM_HANDLE" \
-    --ca-cert "$GATEWAY_CA" &
+    --ca-cert "$GATEWAY_CA" > "$STATE_DIR/sidecar.log" 2>&1 &
 SIDECAR_PID=$!
-
-parse_listen_addr() {
-    local addr="$1"
-    if [[ "$addr" == \[* ]]; then
-        LISTEN_HOST="${addr%%\]:*}"
-        LISTEN_HOST="${LISTEN_HOST#\[}"
-        LISTEN_PORT="${addr##*\]:}"
-    else
-        LISTEN_HOST="${addr%:*}"
-        LISTEN_PORT="${addr##*:}"
-    fi
-}
 
 parse_listen_addr "$LISTEN"
 
@@ -301,6 +390,12 @@ echo "Sidecar ready on $LISTEN"
 
 PROXY_URL="http://$LISTEN"
 
-HTTP_PROXY="$PROXY_URL" \
-HTTPS_PROXY="$PROXY_URL" \
-    claude
+mkdir -p "$STATE_DIR"
+printf '%s\n' "$PROXY_URL" > "$STATE_DIR/proxy_url"
+printf '%s\n' "$SIDECAR_PID" > "$STATE_DIR/sidecar_pid"
+printf '%s\n' "$LISTEN" > "$STATE_DIR/listen"
+printf '%s\n' "$CERT_DIR" > "$STATE_DIR/cert_dir"
+printf '%s\n' "$CERT_DIR/machine-client-spki.der" > "$STATE_DIR/subject_public_key_spki_der_path"
+if [[ -n "$SWTPM_PID" ]]; then
+    printf '%s\n' "$SWTPM_PID" > "$STATE_DIR/swtpm_pid"
+fi
