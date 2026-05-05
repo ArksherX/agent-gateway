@@ -24,7 +24,7 @@ sudo apt-get install libtss2-dev swtpm tpm2-tools pkg-config
 cp config.example.toml config.toml    # edit to taste
 docker compose -f docker-compose.postgres.yml up -d
 export AGENT_GATEWAY_DATABASE_URL=postgres://agent_gateway_admin:agent_gateway_dev@localhost:5432/agent_gateway
-cargo run -- --config config.toml migrate
+psql "$AGENT_GATEWAY_DATABASE_URL" -f migrations/0001_signed_authorization_registry.sql
 ```
 
 `generate-certs.sh` only creates **server** TLS material (`server-ca.pem`, `server.pem`, ...). Each agent platform enrolls with `./examples/demo-agent.sh`, which starts a local `swtpm`, creates a persistent P-256 signing key in that simulated TPM, and prepares `machine-client.pem` as a certificate carrier for that public key and identity extension. The gateway does not trust a client CA bundle; it authorizes the exact subject public key recorded in signed Postgres permission rows.
@@ -95,7 +95,7 @@ agent_gateway --config config.toml
 Run migrations explicitly before starting the gateway:
 
 ```bash
-agent_gateway --config config.toml migrate
+psql "$AGENT_GATEWAY_DATABASE_URL" -f migrations/0001_signed_authorization_registry.sql
 ```
 
 Gateway startup verifies the authorization registry schema version and fails fast if the database is not migrated. The runtime gateway database role should be read-only for authorization tables; use a separate admin role for migrations and registry writes.

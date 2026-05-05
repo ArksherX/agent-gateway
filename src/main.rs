@@ -1,23 +1,16 @@
-mod config;
-mod observability;
-mod policy;
-mod proxy;
-mod registry;
-mod tls;
-
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use agent_gateway::policy::PostgresPolicyEngine;
+use agent_gateway::proxy::MakeProxyService;
+use agent_gateway::{config, observability, policy, proxy, registry, tls};
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use hyper_util::rt::TokioExecutor;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use tokio::net::TcpListener;
 use tracing::{error, info};
-
-use crate::policy::PostgresPolicyEngine;
-use crate::proxy::MakeProxyService;
 
 #[derive(Parser)]
 #[command(name = "agent_gateway", about = "mTLS HTTP/2 CONNECT proxy")]
@@ -25,15 +18,6 @@ struct Cli {
     /// Path to the TOML configuration file
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
-
-    #[command(subcommand)]
-    command: Option<CliCommand>,
-}
-
-#[derive(Clone, Copy, Subcommand)]
-enum CliCommand {
-    /// Run authorization registry database migrations and exit
-    Migrate,
 }
 
 #[tokio::main]
@@ -46,10 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::load(&cli.config)
         .with_context(|| format!("loading config from {}", cli.config.display()))?;
 
-    match cli.command {
-        None => serve(config).await,
-        Some(CliCommand::Migrate) => migrate(config).await,
-    }
+    serve(config).await
 }
 
 async fn serve(config: config::Config) -> anyhow::Result<()> {
@@ -82,12 +63,6 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     }
 
     observability::shutdown();
-    Ok(())
-}
-
-async fn migrate(config: config::Config) -> anyhow::Result<()> {
-    let db_pool = build_pg_pool(&config.policy).await?;
-    registry::RegistryStore::run_migrations(&db_pool).await?;
     Ok(())
 }
 
