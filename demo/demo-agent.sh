@@ -111,7 +111,7 @@ discover_principal() {
   count="$(printf '%s\n' "$labels" | sed '/^$/d' | wc -l | tr -d ' ')"
   if [[ "$count" -ne 1 ]]; then
     echo "expected exactly one TPM principal key label in token '$TOKEN_LABEL', found $count" >&2
-    echo "hint: run ./examples/register-principal-key.sh KEY_ID first on this machine" >&2
+    echo "hint: run ./registry-cli/register-principal-key.sh KEY_ID first on this machine" >&2
     [[ -n "$labels" ]] && printf '%s\n' "$labels" >&2
     exit 1
   fi
@@ -175,7 +175,7 @@ prepare_subject_certificate() {
 grant_permissions() {
   local destination
   for destination in "${GRANTS[@]}"; do
-    "$SCRIPT_DIR/register-permission.sh" \
+    "$REPO_ROOT/registry-cli/register-permission.sh" \
       "$PRINCIPAL" \
       "$IDENTITY" \
       "$SUBJECT_PUBLIC_KEY_SPKI_DER" \

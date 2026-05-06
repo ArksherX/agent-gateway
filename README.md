@@ -20,30 +20,30 @@ sudo apt-get install libtss2-dev swtpm tpm2-tools pkg-config
 ## Quick start
 
 ```bash
-./examples/generate-certs.sh          # server CA + gateway cert under certs/
+./demo/generate-server-certs.sh       # server CA + gateway cert under certs/
 cp config.example.toml config.toml    # edit to taste
 docker compose -f docker-compose.postgres.yml up -d
 export AGENT_GATEWAY_DATABASE_URL=postgres://agent_gateway_admin:agent_gateway_dev@localhost:5432/agent_gateway
 psql "$AGENT_GATEWAY_DATABASE_URL" -f migrations/0001_signed_authorization_registry.sql
 ```
 
-`generate-certs.sh` only creates **server** TLS material (`server-ca.pem`, `server.pem`, ...). Each agent platform enrolls with `./examples/demo-agent.sh`, which starts a local `swtpm`, creates a persistent P-256 signing key in that simulated TPM, and prepares `machine-client.pem` as a certificate carrier for that public key and identity extension. The gateway does not trust a client CA bundle; it authorizes the exact subject public key recorded in signed Postgres permission rows.
+`demo/generate-server-certs.sh` only creates **server** TLS material (`server-ca.pem`, `server.pem`, ...). The local demo enrolls with `./demo/demo-agent.sh`, which starts a local `swtpm`, creates a persistent P-256 signing key in that simulated TPM, and prepares `machine-client.pem` as a certificate carrier for that public key and identity extension. The gateway does not trust a client CA bundle; it authorizes the exact subject public key recorded in signed Postgres permission rows.
 
 Typical first-time flow:
 
-1. `./examples/generate-certs.sh` and `cp config.example.toml config.toml`.
+1. `./demo/generate-server-certs.sh` and `cp config.example.toml config.toml`.
 2. Enroll a trusted principal signing key and grant its destination delegation scope.
 3. The principal creates an agent handle; the script prepares the subject certificate, signs permission rows for its exact SPKI DER, and starts the sidecar.
 4. Start the gateway (`cargo run -- --config config.toml`) before sending prompts through the sidecar.
 
-On later runs, start the gateway first and use `demo-agent.sh prompt`. `connect.sh` prepares `machine-client.pem` for the current simulated TPM key and identity extension whenever it prepares or starts the sidecar. `--regenerate-certs` creates a fresh simulated TPM state; any permissions for the old subject key will no longer match.
+On later runs, start the gateway first and use `./demo/demo-agent.sh prompt`. `./demo/connect.sh` prepares `machine-client.pem` for the current simulated TPM key and identity extension whenever it prepares or starts the sidecar. `--regenerate-certs` creates a fresh simulated TPM state; any permissions for the old subject key will no longer match.
 
-Pass a custom policy extension value: `connect.sh start-sidecar ... --extension-value agent-beta`. The extension value must match `permission_registry.subject_identity` in an active signed permission row.
+Pass a custom policy extension value: `./demo/connect.sh start-sidecar ... --extension-value agent-beta`. The extension value must match `permission_registry.subject_identity` in an active signed permission row.
 
 The simulated TPM state lives under `$AGENT_STATE/client/swtpm/`. By default,
 the sidecar uses TCTI `swtpm:host=127.0.0.1,port=2321` and persistent handle
 `0x81010004`; override the handle or simulator data port with
-`connect.sh start-sidecar --tpm-handle` and
+`./demo/connect.sh start-sidecar --tpm-handle` and
 `--swtpm-port`. The swtpm control port is always the data port plus one, which
 matches the TSS swtpm TCTI convention.
 
@@ -105,7 +105,7 @@ Shut down cleanly with `Ctrl-C`.
 Register a principal signing key from the TPM owner machine with:
 
 ```bash
-./examples/register-principal-key.sh org-alice
+./registry-cli/register-principal-key.sh org-alice
 ```
 
 The script creates or reuses a non-exportable TPM-backed P-256 key through `tpm2_ptool` and PKCS#11, stores only the public key in `principal_signing_keys`, and uses the friendly `key_id` (`org-alice`, `org-bob`, etc.) for the registry row. Run it on the machine that owns the TPM, with `AGENT_GATEWAY_DATABASE_URL` or `DATABASE_URL` pointing at Postgres.
@@ -114,22 +114,22 @@ For the demo, use three windows:
 
 ```bash
 # Principal shell: enroll the principal TPM public key.
-./examples/register-principal-key.sh org-alice
+./registry-cli/register-principal-key.sh org-alice
 
 # Admin shell: grant destination delegation authority to that principal.
-./examples/grant-principal-scope.sh org-alice api.anthropic.com example.com
+./registry-cli/grant-principal-scope.sh org-alice api.anthropic.com example.com
 
 # Principal shell: create a local agent handle with initial signed permissions.
-AGENT_HANDLE="$(./examples/demo-agent.sh create \
+AGENT_HANDLE="$(./demo/demo-agent.sh create \
   --identity agent-alpha \
   --grant api.anthropic.com)"
 
 # Principal shell: send the first prompt through that agent.
-./examples/demo-agent.sh prompt "$AGENT_HANDLE" --prompt "test prompt"
+./demo/demo-agent.sh prompt "$AGENT_HANDLE" --prompt "test prompt"
 
 # Principal shell: grant another destination, then continue the same Claude session.
-./examples/demo-agent.sh grant "$AGENT_HANDLE" --grant example.com
-./examples/demo-agent.sh prompt "$AGENT_HANDLE" --prompt "now try the second destination"
+./demo/demo-agent.sh grant "$AGENT_HANDLE" --grant example.com
+./demo/demo-agent.sh prompt "$AGENT_HANDLE" --prompt "now try the second destination"
 ```
 
 The dashboard runs separately and observes Postgres plus OpenTelemetry. `demo-agent.sh` keeps gateway connection details out of the principal-facing command; set `AGENT_GATEWAY_DEMO_GATEWAY` and `AGENT_GATEWAY_DEMO_GATEWAY_CA` only when overriding the local defaults. `AGENT_GATEWAY_DEMO_GATEWAY_CA` is the CA for the gateway's server certificate, not a client trust root. The first prompt uses `claude -p`; later prompts for the same handle use `claude -c -p` from the handle's working directory.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dev gateway server TLS only → certs/server-ca*.pem, certs/server*.pem. Client enrollment: examples/connect.sh.
+# Demo gateway server TLS only: certs/server-ca*.pem and certs/server*.pem.
 
 set -euo pipefail
 
