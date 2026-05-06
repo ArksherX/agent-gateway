@@ -48,7 +48,7 @@ pub struct ProxyService {
 }
 
 impl ProxyService {
-    pub fn new(
+    fn new(
         policy_engine: Arc<dyn PolicyEngine>,
         peer_certs: Vec<CertificateDer<'static>>,
         source_peer_addr: SocketAddr,
@@ -241,14 +241,14 @@ fn response(status: StatusCode, message: &str) -> Response<ProxyBody> {
 }
 
 #[derive(Clone)]
-pub struct Destination {
-    pub host: String,
-    pub port: u16,
-    pub authority: String,
+struct Destination {
+    host: String,
+    port: u16,
+    authority: String,
 }
 
 impl Destination {
-    pub fn from_request(req: &Request<Incoming>) -> Result<Self, String> {
+    fn from_request(req: &Request<Incoming>) -> Result<Self, String> {
         let authority = req
             .uri()
             .authority()
@@ -256,7 +256,7 @@ impl Destination {
         Self::from_authority(authority)
     }
 
-    pub fn from_authority(authority: &http::uri::Authority) -> Result<Self, String> {
+    fn from_authority(authority: &http::uri::Authority) -> Result<Self, String> {
         let raw_host = authority.host();
         if raw_host.is_empty() {
             return Err("empty host in CONNECT authority".into());
@@ -294,6 +294,65 @@ mod tests {
     use super::*;
     use opentelemetry::trace::TraceContextExt;
     use opentelemetry_sdk::propagation::TraceContextPropagator;
+
+    fn parse_dest(authority: &str) -> Result<Destination, String> {
+        let authority: http::uri::Authority = authority.parse().map_err(|e| format!("{e}"))?;
+        Destination::from_authority(&authority)
+    }
+
+    #[test]
+    fn proxy_dest_hostname_with_port() {
+        let d = parse_dest("api.example.com:443").unwrap();
+        assert_eq!(d.host, "api.example.com");
+        assert_eq!(d.port, 443);
+        assert_eq!(d.authority, "api.example.com:443");
+    }
+
+    #[test]
+    fn proxy_dest_hostname_without_port_defaults_443() {
+        let d = parse_dest("api.example.com").unwrap();
+        assert_eq!(d.host, "api.example.com");
+        assert_eq!(d.port, 443);
+        assert_eq!(d.authority, "api.example.com:443");
+    }
+
+    #[test]
+    fn proxy_dest_hostname_non_default_port() {
+        let d = parse_dest("api.example.com:8080").unwrap();
+        assert_eq!(d.host, "api.example.com");
+        assert_eq!(d.port, 8080);
+        assert_eq!(d.authority, "api.example.com:8080");
+    }
+
+    #[test]
+    fn proxy_dest_hostname_uppercased_is_lowered() {
+        let d = parse_dest("API.EXAMPLE.COM:443").unwrap();
+        assert_eq!(d.authority, "api.example.com:443");
+    }
+
+    #[test]
+    fn proxy_dest_ipv6_with_port() {
+        let d = parse_dest("[::1]:8443").unwrap();
+        assert_eq!(d.host, "::1");
+        assert_eq!(d.port, 8443);
+        assert_eq!(d.authority, "[::1]:8443");
+    }
+
+    #[test]
+    fn proxy_dest_ipv6_default_port() {
+        let d = parse_dest("[::1]").unwrap();
+        assert_eq!(d.host, "::1");
+        assert_eq!(d.port, 443);
+        assert_eq!(d.authority, "[::1]:443");
+    }
+
+    #[test]
+    fn proxy_dest_ipv6_full_address() {
+        let d = parse_dest("[2001:db8::1]:443").unwrap();
+        assert_eq!(d.host, "2001:db8::1");
+        assert_eq!(d.port, 443);
+        assert_eq!(d.authority, "[2001:db8::1]:443");
+    }
 
     #[test]
     fn extracts_trace_context_from_headers() {

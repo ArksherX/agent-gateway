@@ -4,50 +4,41 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPool;
 
-pub const EXPECTED_SCHEMA_VERSION: i32 = 1;
-
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+const EXPECTED_SCHEMA_VERSION: i32 = 1;
 
 #[derive(Clone)]
-pub struct RegistryStore {
+pub(crate) struct RegistryStore {
     pool: PgPool,
     query_timeout: Duration,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub struct CandidatePermission {
-    pub permission_id: String,
-    pub subject_identity: String,
-    pub subject_public_key_spki_der: Vec<u8>,
-    pub destination: String,
-    pub signing_key_id: String,
-    pub permission_not_before: DateTime<Utc>,
-    pub permission_not_after: DateTime<Utc>,
-    pub signature: Vec<u8>,
-    pub signer_algorithm: String,
-    pub signer_public_key_spki_der: Vec<u8>,
-    pub signer_not_before: DateTime<Utc>,
-    pub signer_not_after: DateTime<Utc>,
-    pub signer_revoked_at: Option<DateTime<Utc>>,
-    pub signer_active_now: bool,
+pub(crate) struct CandidatePermission {
+    pub(crate) permission_id: String,
+    pub(crate) subject_identity: String,
+    pub(crate) subject_public_key_spki_der: Vec<u8>,
+    pub(crate) destination: String,
+    pub(crate) signing_key_id: String,
+    pub(crate) permission_not_before: DateTime<Utc>,
+    pub(crate) permission_not_after: DateTime<Utc>,
+    pub(crate) signature: Vec<u8>,
+    pub(crate) signer_algorithm: String,
+    pub(crate) signer_public_key_spki_der: Vec<u8>,
+    pub(crate) signer_not_before: DateTime<Utc>,
+    pub(crate) signer_not_after: DateTime<Utc>,
+    pub(crate) signer_revoked_at: Option<DateTime<Utc>>,
+    pub(crate) signer_active_now: bool,
 }
 
 impl RegistryStore {
-    pub fn new(pool: PgPool, query_timeout: Duration) -> Self {
+    pub(crate) fn new(pool: PgPool, query_timeout: Duration) -> Self {
         Self {
             pool,
             query_timeout,
         }
     }
 
-    pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
-        MIGRATOR
-            .run(pool)
-            .await
-            .context("running authorization registry migrations")
-    }
-
-    pub async fn verify_schema_version(pool: &PgPool) -> anyhow::Result<()> {
+    pub(crate) async fn verify_schema_version(pool: &PgPool) -> anyhow::Result<()> {
         let version = sqlx::query_scalar::<_, i32>(
             "SELECT version FROM agent_gateway_schema_version ORDER BY version DESC LIMIT 1",
         )
@@ -62,7 +53,7 @@ impl RegistryStore {
         Ok(())
     }
 
-    pub async fn candidate_permissions(
+    pub(crate) async fn candidate_permissions(
         &self,
         subject_identity: &str,
         destination: &str,
@@ -111,7 +102,7 @@ impl RegistryStore {
             .context("querying authorization registry permissions")
     }
 
-    pub async fn signer_has_scope(
+    pub(crate) async fn signer_has_scope(
         &self,
         signing_key_id: &str,
         destination: &str,

@@ -17,12 +17,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use x509_parser::prelude::*;
 
-use agent_gateway::policy::{PolicyEngine, PostgresPolicyEngine};
+use agent_gateway::policy::PolicyEngine;
 use agent_gateway::proxy::MakeProxyService;
-use agent_gateway::registry::RegistryStore;
 
 const CLIENT_EXTENSION_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 57264, 1, 1];
 static TEST_ID: AtomicU64 = AtomicU64::new(1);
+static TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 // ---------------------------------------------------------------------------
 // PKI generation
@@ -345,7 +345,6 @@ pub fn install_test_crypto_provider() {
 #[derive(Clone)]
 pub struct TestAuthzRegistry {
     pub pool: sqlx::PgPool,
-    pub store: RegistryStore,
     signing_key: SigningKey,
     key_id: String,
 }
@@ -366,13 +365,10 @@ impl TestAuthzRegistry {
             .await
             .expect("connect to TEST_DATABASE_URL");
 
-        RegistryStore::run_migrations(&pool)
+        TEST_MIGRATOR
+            .run(&pool)
             .await
             .expect("run registry migrations");
-        RegistryStore::verify_schema_version(&pool)
-            .await
-            .expect("verify registry schema");
-
         let signing_key = test_signing_key();
         let public_key_spki_der = signing_key
             .verifying_key()
@@ -400,17 +396,28 @@ impl TestAuthzRegistry {
         .await
         .expect("insert test signing key");
 
-        let store = RegistryStore::new(pool.clone(), std::time::Duration::from_secs(2));
         Self {
             pool,
-            store,
             signing_key,
             key_id,
         }
     }
 
-    pub fn engine(&self, client_ext_oid: &str) -> Arc<dyn PolicyEngine> {
-        Arc::new(PostgresPolicyEngine::new(client_ext_oid, self.store.clone()).unwrap())
+    pub async fn engine(&self, client_ext_oid: &str) -> Arc<dyn PolicyEngine> {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
+        let config = agent_gateway::config::PolicyConfig {
+            client_ext_oid: client_ext_oid.to_owned(),
+            database_url: Some(database_url),
+            database_url_env: None,
+            max_connections: Some(5),
+            connect_timeout_ms: Some(5_000),
+            pool_acquire_timeout_ms: Some(1_000),
+            query_timeout_ms: Some(2_000),
+        };
+        agent_gateway::policy::build_engine(&config)
+            .await
+            .expect("build test policy engine")
     }
 
     pub async fn cleanup(&self) {
@@ -500,11 +507,9 @@ impl TestAuthzRegistry {
     }
 
     pub async fn tamper_permission_destination(&self, permission_id: &str, destination: &str) {
-        let normalized_destination = agent_gateway::policy::normalize_destination(destination)
-            .expect("normalize tampered destination");
         sqlx::query("UPDATE permission_registry SET destination = $2 WHERE permission_id = $1")
             .bind(permission_id)
-            .bind(normalized_destination)
+            .bind(destination)
             .execute(&self.pool)
             .await
             .expect("tamper permission destination");
@@ -517,8 +522,6 @@ impl TestAuthzRegistry {
         destination: &str,
         include_scope: bool,
     ) -> SeededPermission {
-        let normalized_destination = agent_gateway::policy::normalize_destination(destination)
-            .expect("normalize destination");
         let permission_id = unique_id("test-permission");
         let (not_before, not_after) = active_window();
 
@@ -532,7 +535,7 @@ impl TestAuthzRegistry {
                 "#,
             )
             .bind(&self.key_id)
-            .bind(&normalized_destination)
+            .bind(destination)
             .bind(not_before)
             .bind(not_after)
             .execute(&self.pool)
@@ -545,7 +548,7 @@ impl TestAuthzRegistry {
             &self.key_id,
             subject_identity,
             subject_public_key_spki_der,
-            &normalized_destination,
+            destination,
             not_before,
             not_after,
         );
@@ -564,7 +567,7 @@ impl TestAuthzRegistry {
         .bind(&self.key_id)
         .bind(subject_identity)
         .bind(subject_public_key_spki_der)
-        .bind(&normalized_destination)
+        .bind(destination)
         .bind(not_before)
         .bind(not_after)
         .bind(signature.to_der().as_bytes())
@@ -574,7 +577,7 @@ impl TestAuthzRegistry {
 
         SeededPermission {
             permission_id,
-            normalized_destination,
+            normalized_destination: destination.to_owned(),
         }
     }
 }
@@ -607,7 +610,7 @@ pub async fn postgres_engine_allowing(
             .allow(subject_identity, &subject_public_key_spki_der, &destination)
             .await;
     }
-    let engine = registry.engine(client_ext_oid);
+    let engine = registry.engine(client_ext_oid).await;
     TestPolicyEngine { engine, registry }
 }
 

@@ -1,13 +1,17 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
+use anyhow::Context;
 use async_trait::async_trait;
 use chrono::SecondsFormat;
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use p256::pkcs8::DecodePublicKey;
 use rustls_pki_types::CertificateDer;
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use x509_parser::oid_registry::Oid;
 use x509_parser::prelude::*;
 
+use crate::config::PolicyConfig;
 use crate::registry::{CandidatePermission, RegistryStore};
 
 pub struct RequestContext {
@@ -30,13 +34,13 @@ pub trait PolicyEngine: Send + Sync + 'static {
     async fn evaluate(&self, ctx: &RequestContext) -> PolicyDecision;
 }
 
-pub struct PostgresPolicyEngine {
+struct PostgresPolicyEngine {
     client_ext_oid: Oid<'static>,
     registry: RegistryStore,
 }
 
 impl PostgresPolicyEngine {
-    pub fn new(client_ext_oid: &str, registry: RegistryStore) -> anyhow::Result<Self> {
+    fn new(client_ext_oid: &str, registry: RegistryStore) -> anyhow::Result<Self> {
         let client_ext_oid = parse_client_ext_oid(client_ext_oid)?;
 
         Ok(Self {
@@ -46,7 +50,33 @@ impl PostgresPolicyEngine {
     }
 }
 
-pub fn parse_client_ext_oid(value: &str) -> anyhow::Result<Oid<'static>> {
+pub async fn build_engine(config: &PolicyConfig) -> anyhow::Result<Arc<dyn PolicyEngine>> {
+    let db_pool = build_pg_pool(config).await?;
+    RegistryStore::verify_schema_version(&db_pool).await?;
+    let registry = RegistryStore::new(db_pool, config.query_timeout());
+    Ok(Arc::new(PostgresPolicyEngine::new(
+        &config.client_ext_oid,
+        registry,
+    )?))
+}
+
+async fn build_pg_pool(policy: &PolicyConfig) -> anyhow::Result<PgPool> {
+    let database_url = policy.database_url()?;
+    let connect_options = PgConnectOptions::from_str(&database_url)
+        .context("parsing authorization registry database URL")?;
+
+    let connect = PgPoolOptions::new()
+        .max_connections(policy.max_connections())
+        .acquire_timeout(policy.pool_acquire_timeout())
+        .connect_with(connect_options);
+
+    tokio::time::timeout(policy.connect_timeout(), connect)
+        .await
+        .context("authorization registry database connect timed out")?
+        .context("connecting to authorization registry database")
+}
+
+pub(crate) fn parse_client_ext_oid(value: &str) -> anyhow::Result<Oid<'static>> {
     Oid::from_str(value).map_err(|e| anyhow::anyhow!("invalid policy.client_ext_oid: {e:?}"))
 }
 
@@ -59,7 +89,7 @@ pub fn parse_client_ext_oid(value: &str) -> anyhow::Result<Oid<'static>> {
 ///   - `[ipv6]:port`        → `[ipv6]:port`
 ///   - `[ipv6]`             → `[ipv6]:443`
 ///   - bare `ipv6` (colons, no brackets) → `[ipv6]:443`
-pub fn normalize_destination(dest: &str) -> anyhow::Result<String> {
+pub(crate) fn normalize_destination(dest: &str) -> anyhow::Result<String> {
     let dest = dest.trim();
     anyhow::ensure!(!dest.is_empty(), "destination must not be empty");
 
@@ -307,6 +337,113 @@ fn lower_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn normalize_plain_hostname_defaults_to_443() {
+        assert_eq!(
+            normalize_destination("api.example.com").unwrap(),
+            "api.example.com:443"
+        );
+    }
+
+    #[test]
+    fn normalize_hostname_with_explicit_port() {
+        assert_eq!(
+            normalize_destination("api.example.com:8080").unwrap(),
+            "api.example.com:8080"
+        );
+    }
+
+    #[test]
+    fn normalize_hostname_with_443() {
+        assert_eq!(
+            normalize_destination("api.example.com:443").unwrap(),
+            "api.example.com:443"
+        );
+    }
+
+    #[test]
+    fn normalize_lowercases_hostname() {
+        assert_eq!(
+            normalize_destination("API.EXAMPLE.COM:443").unwrap(),
+            "api.example.com:443"
+        );
+        assert_eq!(
+            normalize_destination("API.EXAMPLE.COM").unwrap(),
+            "api.example.com:443"
+        );
+    }
+
+    #[test]
+    fn normalize_bracketed_ipv6_with_port() {
+        assert_eq!(normalize_destination("[::1]:8443").unwrap(), "[::1]:8443");
+    }
+
+    #[test]
+    fn normalize_bracketed_ipv6_without_port_defaults_to_443() {
+        assert_eq!(normalize_destination("[::1]").unwrap(), "[::1]:443");
+    }
+
+    #[test]
+    fn normalize_bare_ipv6_defaults_to_443() {
+        assert_eq!(normalize_destination("::1").unwrap(), "[::1]:443");
+        assert_eq!(
+            normalize_destination("2001:db8::1").unwrap(),
+            "[2001:db8::1]:443"
+        );
+    }
+
+    #[test]
+    fn normalize_bare_ipv6_lowercases() {
+        assert_eq!(normalize_destination("FE80::1").unwrap(), "[fe80::1]:443");
+    }
+
+    #[test]
+    fn normalize_rejects_empty() {
+        assert!(normalize_destination("").is_err());
+        assert!(normalize_destination("  ").is_err());
+    }
+
+    #[test]
+    fn normalize_rejects_empty_bracketed_host() {
+        assert!(normalize_destination("[]").is_err());
+        assert!(normalize_destination("[]:443").is_err());
+    }
+
+    #[test]
+    fn normalize_rejects_missing_close_bracket() {
+        assert!(normalize_destination("[::1").is_err());
+    }
+
+    #[test]
+    fn normalize_rejects_non_numeric_port() {
+        assert!(normalize_destination("host:abc").is_err());
+    }
+
+    #[test]
+    fn normalize_rejects_port_zero() {
+        assert!(normalize_destination("host:0").is_err());
+        assert!(normalize_destination("[::1]:0").is_err());
+    }
+
+    #[test]
+    fn normalize_rejects_invalid_multi_colon() {
+        assert!(normalize_destination("foo:bar:baz").is_err());
+        assert!(normalize_destination("api.example.com:443:extra").is_err());
+    }
+
+    #[test]
+    fn normalize_rejects_invalid_bracketed_host() {
+        assert!(normalize_destination("[not-ipv6]:443").is_err());
+    }
+
+    #[test]
+    fn normalize_trims_whitespace() {
+        assert_eq!(
+            normalize_destination("  api.example.com:443  ").unwrap(),
+            "api.example.com:443"
+        );
+    }
 
     #[test]
     fn canonical_permission_bytes_are_stable() {

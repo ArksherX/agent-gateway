@@ -7,8 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use common::{TestAuthzRegistry, TestPki, certificate_spki_der, unique_test_identity};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
-use agent_gateway::policy::{self, PolicyDecision, PolicyEngine, RequestContext};
-use agent_gateway::proxy::Destination;
+use agent_gateway::policy::{PolicyDecision, PolicyEngine, RequestContext};
 
 const EXT_OID: &str = "1.3.6.1.4.1.57264.1.1";
 
@@ -32,121 +31,6 @@ fn assert_deny(decision: PolicyDecision) {
     }
 }
 
-// ---- normalize_destination unit tests ----
-
-#[test]
-fn normalize_plain_hostname_defaults_to_443() {
-    assert_eq!(
-        policy::normalize_destination("api.example.com").unwrap(),
-        "api.example.com:443"
-    );
-}
-
-#[test]
-fn normalize_hostname_with_explicit_port() {
-    assert_eq!(
-        policy::normalize_destination("api.example.com:8080").unwrap(),
-        "api.example.com:8080"
-    );
-}
-
-#[test]
-fn normalize_hostname_with_443() {
-    assert_eq!(
-        policy::normalize_destination("api.example.com:443").unwrap(),
-        "api.example.com:443"
-    );
-}
-
-#[test]
-fn normalize_lowercases_hostname() {
-    assert_eq!(
-        policy::normalize_destination("API.EXAMPLE.COM:443").unwrap(),
-        "api.example.com:443"
-    );
-    assert_eq!(
-        policy::normalize_destination("API.EXAMPLE.COM").unwrap(),
-        "api.example.com:443"
-    );
-}
-
-#[test]
-fn normalize_bracketed_ipv6_with_port() {
-    assert_eq!(
-        policy::normalize_destination("[::1]:8443").unwrap(),
-        "[::1]:8443"
-    );
-}
-
-#[test]
-fn normalize_bracketed_ipv6_without_port_defaults_to_443() {
-    assert_eq!(policy::normalize_destination("[::1]").unwrap(), "[::1]:443");
-}
-
-#[test]
-fn normalize_bare_ipv6_defaults_to_443() {
-    assert_eq!(policy::normalize_destination("::1").unwrap(), "[::1]:443");
-    assert_eq!(
-        policy::normalize_destination("2001:db8::1").unwrap(),
-        "[2001:db8::1]:443"
-    );
-}
-
-#[test]
-fn normalize_bare_ipv6_lowercases() {
-    assert_eq!(
-        policy::normalize_destination("FE80::1").unwrap(),
-        "[fe80::1]:443"
-    );
-}
-
-#[test]
-fn normalize_rejects_empty() {
-    assert!(policy::normalize_destination("").is_err());
-    assert!(policy::normalize_destination("  ").is_err());
-}
-
-#[test]
-fn normalize_rejects_empty_bracketed_host() {
-    assert!(policy::normalize_destination("[]").is_err());
-    assert!(policy::normalize_destination("[]:443").is_err());
-}
-
-#[test]
-fn normalize_rejects_missing_close_bracket() {
-    assert!(policy::normalize_destination("[::1").is_err());
-}
-
-#[test]
-fn normalize_rejects_non_numeric_port() {
-    assert!(policy::normalize_destination("host:abc").is_err());
-}
-
-#[test]
-fn normalize_rejects_port_zero() {
-    assert!(policy::normalize_destination("host:0").is_err());
-    assert!(policy::normalize_destination("[::1]:0").is_err());
-}
-
-#[test]
-fn normalize_rejects_invalid_multi_colon() {
-    assert!(policy::normalize_destination("foo:bar:baz").is_err());
-    assert!(policy::normalize_destination("api.example.com:443:extra").is_err());
-}
-
-#[test]
-fn normalize_rejects_invalid_bracketed_host() {
-    assert!(policy::normalize_destination("[not-ipv6]:443").is_err());
-}
-
-#[test]
-fn normalize_trims_whitespace() {
-    assert_eq!(
-        policy::normalize_destination("  api.example.com:443  ").unwrap(),
-        "api.example.com:443"
-    );
-}
-
 // ---- Policy: allow / deny ----
 
 #[tokio::test]
@@ -157,7 +41,7 @@ async fn policy_allows_matching_cert_and_destination() {
     registry
         .allow_for_pki(&pki, &subject, "api.example.com:443")
         .await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     assert_allow(eval(engine.as_ref(), &pki, "api.example.com:443").await);
     registry.cleanup().await;
 }
@@ -170,7 +54,7 @@ async fn policy_allows_explicit_non_default_port() {
     registry
         .allow_for_pki(&pki, &subject, "custom.example.com:8443")
         .await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     assert_allow(eval(engine.as_ref(), &pki, "custom.example.com:8443").await);
     registry.cleanup().await;
 }
@@ -183,7 +67,7 @@ async fn policy_denies_wrong_destination() {
     registry
         .allow_for_pki(&pki, &subject, "api.example.com:443")
         .await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     match eval(engine.as_ref(), &pki, "evil.example.com:443").await {
         PolicyDecision::Deny {
             source_identity, ..
@@ -201,7 +85,7 @@ async fn policy_denies_wrong_port() {
     registry
         .allow_for_pki(&pki, &subject, "api.example.com:443")
         .await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     assert_deny(eval(engine.as_ref(), &pki, "api.example.com:8080").await);
     registry.cleanup().await;
 }
@@ -216,7 +100,7 @@ async fn policy_denies_unknown_extension_value() {
     registry
         .allow_for_pki(&authorized_pki, &subject, "api.example.com:443")
         .await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     match eval(engine.as_ref(), &pki, "api.example.com:443").await {
         PolicyDecision::Deny {
             source_identity, ..
@@ -235,7 +119,7 @@ async fn policy_denies_same_identity_and_destination_with_different_key() {
     registry
         .allow_for_pki(&authorized_pki, &subject, "api.example.com:443")
         .await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     match eval(engine.as_ref(), &different_key_pki, "api.example.com:443").await {
         PolicyDecision::Deny {
             source_identity,
@@ -260,7 +144,7 @@ async fn policy_denies_no_cert() {
     registry
         .allow_for_pki(&pki, &subject, "api.example.com:443")
         .await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     let ctx = RequestContext {
         peer_certificates: vec![],
         destination: "api.example.com:443".into(),
@@ -282,10 +166,10 @@ async fn policy_config_without_port_defaults_to_443() {
     let registry = TestAuthzRegistry::new().await;
     let pki = TestPki::new(&subject);
     registry
-        .allow_for_pki(&pki, &subject, "api.example.com")
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
         .await;
-    let engine = registry.engine(EXT_OID);
-    assert_allow(eval(engine.as_ref(), &pki, "api.example.com:443").await);
+    let engine = registry.engine(EXT_OID).await;
+    assert_allow(eval(engine.as_ref(), &pki, "api.example.com").await);
     registry.cleanup().await;
 }
 
@@ -295,9 +179,9 @@ async fn policy_config_without_port_denies_non_443() {
     let registry = TestAuthzRegistry::new().await;
     let pki = TestPki::new(&subject);
     registry
-        .allow_for_pki(&pki, &subject, "api.example.com")
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
         .await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     assert_deny(eval(engine.as_ref(), &pki, "api.example.com:8080").await);
     registry.cleanup().await;
 }
@@ -310,7 +194,7 @@ async fn policy_ipv6_config_matches_bracketed_request() {
     let registry = TestAuthzRegistry::new().await;
     let pki = TestPki::new(&subject);
     registry.allow_for_pki(&pki, &subject, "[::1]:8443").await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     assert_allow(eval(engine.as_ref(), &pki, "[::1]:8443").await);
     assert_deny(eval(engine.as_ref(), &pki, "[::1]:443").await);
     registry.cleanup().await;
@@ -321,10 +205,9 @@ async fn policy_bare_ipv6_config_matches_bracketed_request() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
     let pki = TestPki::new(&subject);
-    registry.allow_for_pki(&pki, &subject, "::1").await;
-    let engine = registry.engine(EXT_OID);
-    // bare "::1" in config normalizes to "[::1]:443", request "[::1]:443" should match
-    assert_allow(eval(engine.as_ref(), &pki, "[::1]:443").await);
+    registry.allow_for_pki(&pki, &subject, "[::1]:443").await;
+    let engine = registry.engine(EXT_OID).await;
+    assert_allow(eval(engine.as_ref(), &pki, "::1").await);
     assert_deny(eval(engine.as_ref(), &pki, "[::1]:8080").await);
     registry.cleanup().await;
 }
@@ -339,7 +222,7 @@ async fn policy_destination_matching_is_case_insensitive() {
     registry
         .allow_for_pki(&pki, &subject, "api.example.com:443")
         .await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     assert_allow(eval(engine.as_ref(), &pki, "API.EXAMPLE.COM:443").await);
     registry.cleanup().await;
 }
@@ -355,7 +238,7 @@ async fn policy_denies_tampered_permission_destination() {
     registry
         .tamper_permission_destination(&permission.permission_id, "evil.example.com:443")
         .await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     assert_deny(eval(engine.as_ref(), &pki, "evil.example.com:443").await);
     registry.cleanup().await;
 }
@@ -369,7 +252,7 @@ async fn policy_denies_revoked_permission() {
         .allow_for_pki(&pki, &subject, "api.example.com:443")
         .await;
     registry.revoke_permission(&permission.permission_id).await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     match eval(engine.as_ref(), &pki, "api.example.com:443").await {
         PolicyDecision::Deny {
             source_identity,
@@ -395,7 +278,7 @@ async fn policy_denies_revoked_signer() {
         .allow_for_pki(&pki, &subject, "api.example.com:443")
         .await;
     registry.revoke_signer().await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     match eval(engine.as_ref(), &pki, "api.example.com:443").await {
         PolicyDecision::Deny {
             source_identity,
@@ -420,7 +303,7 @@ async fn policy_denies_signer_scope_violation() {
     registry
         .allow_without_signer_scope_for_pki(&pki, &subject, "api.example.com:443")
         .await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
     assert_deny(eval(engine.as_ref(), &pki, "api.example.com:443").await);
     registry.cleanup().await;
 }
@@ -645,81 +528,16 @@ database_url = "postgres://example.invalid/agent_gateway"
     );
 }
 
-// ---- Proxy Destination parsing ----
-
-fn parse_dest(authority: &str) -> Result<Destination, String> {
-    let authority: http::uri::Authority = authority.parse().map_err(|e| format!("{e}"))?;
-    Destination::from_authority(&authority)
-}
-
-#[test]
-fn proxy_dest_hostname_with_port() {
-    let d = parse_dest("api.example.com:443").unwrap();
-    assert_eq!(d.host, "api.example.com");
-    assert_eq!(d.port, 443);
-    assert_eq!(d.authority, "api.example.com:443");
-}
-
-#[test]
-fn proxy_dest_hostname_without_port_defaults_443() {
-    let d = parse_dest("api.example.com").unwrap();
-    assert_eq!(d.host, "api.example.com");
-    assert_eq!(d.port, 443);
-    assert_eq!(d.authority, "api.example.com:443");
-}
-
-#[test]
-fn proxy_dest_hostname_non_default_port() {
-    let d = parse_dest("api.example.com:8080").unwrap();
-    assert_eq!(d.host, "api.example.com");
-    assert_eq!(d.port, 8080);
-    assert_eq!(d.authority, "api.example.com:8080");
-}
-
-#[test]
-fn proxy_dest_hostname_uppercased_is_lowered() {
-    let d = parse_dest("API.EXAMPLE.COM:443").unwrap();
-    assert_eq!(d.authority, "api.example.com:443");
-}
-
-#[test]
-fn proxy_dest_ipv6_with_port() {
-    let d = parse_dest("[::1]:8443").unwrap();
-    assert_eq!(d.host, "::1");
-    assert_eq!(d.port, 8443);
-    assert_eq!(d.authority, "[::1]:8443");
-}
-
-#[test]
-fn proxy_dest_ipv6_default_port() {
-    let d = parse_dest("[::1]").unwrap();
-    assert_eq!(d.host, "::1");
-    assert_eq!(d.port, 443);
-    assert_eq!(d.authority, "[::1]:443");
-}
-
-#[test]
-fn proxy_dest_ipv6_full_address() {
-    let d = parse_dest("[2001:db8::1]:443").unwrap();
-    assert_eq!(d.host, "2001:db8::1");
-    assert_eq!(d.port, 443);
-    assert_eq!(d.authority, "[2001:db8::1]:443");
-}
-
 #[tokio::test]
 async fn proxy_dest_ipv6_matches_policy() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
     let pki = TestPki::new(&subject);
     registry.allow_for_pki(&pki, &subject, "[::1]:8443").await;
-    let engine = registry.engine(EXT_OID);
+    let engine = registry.engine(EXT_OID).await;
 
-    // Simulate what proxy.rs produces for a CONNECT [::1]:8443 request
-    let d = parse_dest("[::1]:8443").unwrap();
-    assert_allow(eval(engine.as_ref(), &pki, &d.authority).await);
+    assert_allow(eval(engine.as_ref(), &pki, "[::1]:8443").await);
 
-    // Wrong port should deny
-    let d2 = parse_dest("[::1]:443").unwrap();
-    assert_deny(eval(engine.as_ref(), &pki, &d2.authority).await);
+    assert_deny(eval(engine.as_ref(), &pki, "[::1]:443").await);
     registry.cleanup().await;
 }
