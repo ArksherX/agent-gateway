@@ -10,56 +10,9 @@ The proxy accepts incoming mTLS connections, extracts a custom extension value f
 cargo build --release
 ```
 
-The sidecar uses a simulated TPM identity. Install the native TPM stack before
-building or running it:
-
-```bash
-sudo apt-get install libtss2-dev swtpm tpm2-tools pkg-config
-```
-
-## Quick start
-
-```bash
-./demo/setup.sh
-```
-
-The setup script generates demo TLS material, creates `config.toml` when needed,
-starts Postgres and static HTTPS mock services with Podman Compose or Docker Compose, applies the
-database migration, builds and starts the gateway, enrolls a demo principal,
-grants access to `docstore` and `messaging`, creates a demo agent handle, and
-verifies that Claude Code can fetch `https://docstore/health` through the
-gateway.
-
-`demo/generate-server-certs.sh` creates gateway TLS material (`server-ca.pem`,
-`server.pem`, ...) and mock HTTPS service TLS material (`mock-ca.pem`,
-`mock-services.pem`, ...). The local demo enrolls with `./demo/demo-agent.sh`,
-which starts a local `swtpm`, creates a persistent P-256 signing key in that
-simulated TPM, and prepares `machine-client.pem` as a certificate carrier for
-that public key and identity extension. The gateway does not trust a client CA
-bundle; it authorizes the exact subject public key recorded in signed Postgres
-permission rows.
-
-`demo/setup.sh` keeps its tpm2-pkcs11 state under the demo state directory by
-default. Override `AGENT_GATEWAY_DEMO_TPM2_PKCS11_STORE` only when you
-intentionally want the demo principal to use another store.
-
-After setup, prompt the demo agent:
-
-```bash
-./demo/demo-agent.sh prompt agent-alpha \
-  --prompt "Use the Bash tool to run exactly these commands: curl -sS https://docstore/documents and curl -sS https://messaging/messages. Then summarize what you found."
-```
-
-On later runs, start the gateway first and use `./demo/demo-agent.sh prompt`. `./demo/connect.sh` prepares `machine-client.pem` for the current simulated TPM key and identity extension whenever it prepares or starts the sidecar. `--regenerate-certs` creates a fresh simulated TPM state; any permissions for the old subject key will no longer match.
-
-Pass a custom policy extension value: `./demo/connect.sh start-sidecar ... --extension-value agent-beta`. The extension value must match `permission_registry.subject_identity` in an active signed permission row.
-
-The simulated TPM state lives under `$AGENT_STATE/client/swtpm/`. By default,
-the sidecar uses TCTI `swtpm:host=127.0.0.1,port=2321` and persistent handle
-`0x81010004`; override the handle or simulator data port with
-`./demo/connect.sh start-sidecar --tpm-handle` and
-`--swtpm-port`. The swtpm control port is always the data port plus one, which
-matches the TSS swtpm TCTI convention.
+The end-to-end demo, sidecar, TPM setup, mock services, and registry helper
+scripts live in the split demo repository. The demo pins a gateway image such as
+`ghcr.io/sl5taskforce/agent-gateway:main` and does not require this source checkout.
 
 ## Configuration
 
@@ -93,12 +46,7 @@ Copy `config.example.toml` to `config.toml` and edit it. Key sections:
 | `otlp_endpoint` | no | OTLP gRPC endpoint for distributed tracing |
 
 Set `AGENT_GATEWAY_LOG_STDOUT=false` to disable stdout/stderr formatting while
-leaving OTLP export enabled. The sidecar reads observability settings from
-environment variables. Use `RUST_LOG` for its tracing filter and set
-`OTEL_EXPORTER_OTLP_ENDPOINT` (for example, `http://localhost:4317`) to export
-sidecar spans over OTLP. When enabled, the sidecar injects W3C trace-context
-headers into the CONNECT request it sends to the gateway, and the gateway
-continues the same trace.
+leaving OTLP export enabled.
 
 ## Running
 
@@ -115,34 +63,6 @@ psql "$AGENT_GATEWAY_DATABASE_URL" -f migrations/0001_signed_authorization_regis
 Gateway startup verifies the authorization registry schema version and fails fast if the database is not migrated. The runtime gateway database role should be read-only for authorization tables; use a separate admin role for migrations and registry writes.
 
 Shut down cleanly with `Ctrl-C`.
-
-Register a principal signing key from the TPM owner machine with:
-
-```bash
-./registry-cli/register-principal-key.sh org-alice
-```
-
-The script creates or reuses a non-exportable TPM-backed P-256 key through `tpm2_ptool` and PKCS#11, stores only the public key in `principal_signing_keys`, and uses the friendly `key_id` (`org-alice`, `org-bob`, etc.) for the registry row. Run it on the machine that owns the TPM, with `AGENT_GATEWAY_DATABASE_URL` or `DATABASE_URL` pointing at Postgres.
-
-For a manual demo without `./demo/setup.sh`, use three windows:
-
-```bash
-# Principal shell: enroll the principal TPM public key.
-./registry-cli/register-principal-key.sh org-alice
-
-# Admin shell: grant destination delegation authority to that principal.
-./registry-cli/grant-principal-scope.sh org-alice docstore messaging api.anthropic.com
-
-# Principal shell: create a local agent handle with initial signed permissions.
-AGENT_HANDLE="$(./demo/demo-agent.sh create \
-  --identity agent-alpha \
-  --grant docstore \
-  --grant messaging)"
-
-# Principal shell: send the first prompt through that agent.
-./demo/demo-agent.sh prompt "$AGENT_HANDLE" \
-  --prompt "Access https://docstore/documents with curl."
-```
 
 ## Authorization Registry
 

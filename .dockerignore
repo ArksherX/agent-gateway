@@ -2,6 +2,7 @@
 /.cursor
 /target
 /certs
+/agent_gateway_demo
 /logs.txt
 /*.log
 /*.jsonl
