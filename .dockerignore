@@ -1,0 +1,7 @@
+/.git
+/.cursor
+/target
+/certs
+/logs.txt
+/*.log
+/*.jsonl

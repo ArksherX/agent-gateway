@@ -206,16 +206,19 @@ run_prompt() {
     PROXY_URL="$(<"$proxy_file")"
     WORK_DIR="${WORK_DIR:-$STATE_DIR/work}"
     mkdir -p "$WORK_DIR"
+    CLAUDE_CURL_PERMISSIONS=(
+        --allowedTools "Bash(curl *)"
+    )
 
     if [[ -f "$STATE_DIR/claude_started" ]]; then
         (
             cd "$WORK_DIR"
-            HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" claude -c -p "$PROMPT"
+            HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-}" SSL_CERT_FILE="${SSL_CERT_FILE:-}" claude "${CLAUDE_CURL_PERMISSIONS[@]}" -c -p "$PROMPT"
         )
     else
         (
             cd "$WORK_DIR"
-            HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" claude -p "$PROMPT"
+            HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-}" SSL_CERT_FILE="${SSL_CERT_FILE:-}" claude "${CLAUDE_CURL_PERMISSIONS[@]}" -p "$PROMPT"
         )
         : > "$STATE_DIR/claude_started"
     fi

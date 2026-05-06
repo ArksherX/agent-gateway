@@ -1,0 +1,25 @@
+{
+	auto_https off
+}
+
+docstore:443 {
+	tls /certs/mock-services.pem /certs/mock-services-key.pem
+	header Content-Type application/json
+
+	respond /health `{"status":"ok","service":"docstore"}` 200
+
+	respond /documents `{"documents":[{"id":"handbook","title":"Employee Handbook","summary":"Demo employees can find travel, device, and security policies here."},{"id":"incident-runbook","title":"Incident Runbook","summary":"Page the on-call lead, create a channel, and post status updates every 30 minutes."}]}` 200
+
+	respond `{"error":"not_found","service":"docstore"}` 404
+}
+
+messaging:443 {
+	tls /certs/mock-services.pem /certs/mock-services-key.pem
+	header Content-Type application/json
+
+	respond /health `{"status":"ok","service":"messaging"}` 200
+
+	respond /messages `{"messages":[{"from":"alice","channel":"demo-ops","text":"Quarterly planning starts at 2pm."},{"from":"bob","channel":"demo-ops","text":"Please review the incident runbook before the tabletop."}]}` 200
+
+	respond `{"error":"not_found","service":"messaging"}` 404
+}

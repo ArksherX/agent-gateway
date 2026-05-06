@@ -7,6 +7,8 @@ STATE_ROOT="${AGENT_GATEWAY_DEMO_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state
 DEFAULT_VALID_DAYS="${AGENT_GATEWAY_PERMISSION_VALID_DAYS:-30}"
 DEFAULT_GATEWAY="${AGENT_GATEWAY_DEMO_GATEWAY:-127.0.0.1:8443}"
 DEFAULT_GATEWAY_CA="${AGENT_GATEWAY_DEMO_GATEWAY_CA:-$REPO_ROOT/certs/server-ca.pem}"
+DEFAULT_MOCK_CA="${AGENT_GATEWAY_DEMO_MOCK_CA:-$REPO_ROOT/certs/mock-ca.pem}"
+DEFAULT_SIDECAR_BIN="${AGENT_GATEWAY_DEMO_SIDECAR_BIN:-}"
 DEFAULT_LISTEN_HOST="${AGENT_GATEWAY_DEMO_LISTEN_HOST:-127.0.0.1}"
 DEFAULT_LISTEN_PORT="${AGENT_GATEWAY_DEMO_LISTEN_PORT:-3128}"
 DEFAULT_SWTPM_PORT="${AGENT_GATEWAY_DEMO_SWTPM_PORT:-2321}"
@@ -25,6 +27,8 @@ Usage:
 Environment:
   AGENT_GATEWAY_DEMO_GATEWAY defaults to 127.0.0.1:8443.
   AGENT_GATEWAY_DEMO_GATEWAY_CA defaults to certs/server-ca.pem.
+  AGENT_GATEWAY_DEMO_MOCK_CA defaults to certs/mock-ca.pem for Claude HTTPS requests.
+  AGENT_GATEWAY_DEMO_SIDECAR_BIN can pin the sidecar binary used by start-sidecar.
   AGENT_GATEWAY_DEMO_STATE_DIR overrides the local agent handle directory.
   AGENT_GATEWAY_PERMISSION_VALID_DAYS defaults to 30.
   TPM2_PKCS11_STORE defaults to $HOME/.tpm2_pkcs11.
@@ -150,17 +154,24 @@ sidecar_running() {
 
 ensure_sidecar() {
   local dir="$1"
+  local args=(
+    start-sidecar
+    --state-dir "$dir"
+    --gateway "$GATEWAY"
+    --gateway-ca "$GATEWAY_CA"
+    --extension-value "$IDENTITY"
+    --listen "$LISTEN"
+    --swtpm-port "$SWTPM_PORT"
+  )
   if sidecar_running "$dir"; then
     return
   fi
 
-  "$SCRIPT_DIR/connect.sh" start-sidecar \
-    --state-dir "$dir" \
-    --gateway "$GATEWAY" \
-    --gateway-ca "$GATEWAY_CA" \
-    --extension-value "$IDENTITY" \
-    --listen "$LISTEN" \
-    --swtpm-port "$SWTPM_PORT" >&2
+  if [[ -n "$DEFAULT_SIDECAR_BIN" ]]; then
+    args+=(--sidecar-bin "$DEFAULT_SIDECAR_BIN")
+  fi
+
+  "$SCRIPT_DIR/connect.sh" "${args[@]}" >&2
 }
 
 prepare_subject_certificate() {
@@ -261,6 +272,15 @@ cmd_prompt() {
 
   [[ -n "$PROMPT" ]] || { echo "error: prompt requires --prompt" >&2; exit 2; }
   ensure_sidecar "$STATE_DIR_CURRENT"
+  [[ -f "$DEFAULT_MOCK_CA" ]] || {
+    echo "error: mock service CA file not found: $DEFAULT_MOCK_CA" >&2
+    echo "hint: run ./demo/generate-server-certs.sh or ./demo/setup.sh first" >&2
+    exit 1
+  }
+  export NODE_EXTRA_CA_CERTS="$DEFAULT_MOCK_CA"
+  export CURL_CA_BUNDLE="$DEFAULT_MOCK_CA"
+  export SSL_CERT_FILE="$DEFAULT_MOCK_CA"
+  export CLAUDE_CODE_PROXY_RESOLVES_HOSTS="${CLAUDE_CODE_PROXY_RESOLVES_HOSTS:-1}"
   "$SCRIPT_DIR/connect.sh" prompt \
     --state-dir "$STATE_DIR_CURRENT" \
     --work-dir "$STATE_DIR_CURRENT/work" \
