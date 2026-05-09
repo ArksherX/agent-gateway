@@ -3,6 +3,9 @@ name = "agent_gateway"
 version = "0.1.0"
 edition = "2024"
 
+[lints.clippy]
+pedantic = "deny"
+
 [dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }

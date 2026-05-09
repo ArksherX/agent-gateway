@@ -50,6 +50,13 @@ impl PostgresPolicyEngine {
     }
 }
 
+/// Build the configured policy engine.
+///
+/// # Errors
+///
+/// Returns an error if the database URL is invalid, the database cannot be
+/// reached, the schema version does not match, or the client extension OID is
+/// invalid.
 pub async fn build_engine(config: &PolicyConfig) -> anyhow::Result<Arc<dyn PolicyEngine>> {
     let db_pool = build_pg_pool(config).await?;
     RegistryStore::verify_schema_version(&db_pool).await?;
@@ -284,7 +291,7 @@ fn certificate_subject(
                 return Err("extension value contains trailing bytes".into());
             }
             Ok(CertificateSubject {
-                identity: v.string().to_owned(),
+                identity: v.string().clone(),
                 public_key_spki_der,
             })
         }

@@ -25,7 +25,7 @@ fn assert_allow(decision: PolicyDecision) {
     }
 }
 
-fn assert_deny(decision: PolicyDecision) {
+fn assert_deny(decision: &PolicyDecision) {
     if let PolicyDecision::Allow { .. } = decision {
         panic!("expected Deny, got Allow");
     }
@@ -86,7 +86,7 @@ async fn policy_denies_wrong_port() {
         .allow_for_pki(&pki, &subject, "api.example.com:443")
         .await;
     let engine = registry.engine(EXT_OID).await;
-    assert_deny(eval(engine.as_ref(), &pki, "api.example.com:8080").await);
+    assert_deny(&eval(engine.as_ref(), &pki, "api.example.com:8080").await);
     registry.cleanup().await;
 }
 
@@ -182,7 +182,7 @@ async fn policy_config_without_port_denies_non_443() {
         .allow_for_pki(&pki, &subject, "api.example.com:443")
         .await;
     let engine = registry.engine(EXT_OID).await;
-    assert_deny(eval(engine.as_ref(), &pki, "api.example.com:8080").await);
+    assert_deny(&eval(engine.as_ref(), &pki, "api.example.com:8080").await);
     registry.cleanup().await;
 }
 
@@ -196,7 +196,7 @@ async fn policy_ipv6_config_matches_bracketed_request() {
     registry.allow_for_pki(&pki, &subject, "[::1]:8443").await;
     let engine = registry.engine(EXT_OID).await;
     assert_allow(eval(engine.as_ref(), &pki, "[::1]:8443").await);
-    assert_deny(eval(engine.as_ref(), &pki, "[::1]:443").await);
+    assert_deny(&eval(engine.as_ref(), &pki, "[::1]:443").await);
     registry.cleanup().await;
 }
 
@@ -208,7 +208,7 @@ async fn policy_bare_ipv6_config_matches_bracketed_request() {
     registry.allow_for_pki(&pki, &subject, "[::1]:443").await;
     let engine = registry.engine(EXT_OID).await;
     assert_allow(eval(engine.as_ref(), &pki, "::1").await);
-    assert_deny(eval(engine.as_ref(), &pki, "[::1]:8080").await);
+    assert_deny(&eval(engine.as_ref(), &pki, "[::1]:8080").await);
     registry.cleanup().await;
 }
 
@@ -239,7 +239,7 @@ async fn policy_denies_tampered_permission_destination() {
         .tamper_permission_destination(&permission.permission_id, "evil.example.com:443")
         .await;
     let engine = registry.engine(EXT_OID).await;
-    assert_deny(eval(engine.as_ref(), &pki, "evil.example.com:443").await);
+    assert_deny(&eval(engine.as_ref(), &pki, "evil.example.com:443").await);
     registry.cleanup().await;
 }
 
@@ -304,7 +304,7 @@ async fn policy_denies_signer_scope_violation() {
         .allow_without_signer_scope_for_pki(&pki, &subject, "api.example.com:443")
         .await;
     let engine = registry.engine(EXT_OID).await;
-    assert_deny(eval(engine.as_ref(), &pki, "api.example.com:443").await);
+    assert_deny(&eval(engine.as_ref(), &pki, "api.example.com:443").await);
     registry.cleanup().await;
 }
 
@@ -538,6 +538,6 @@ async fn proxy_dest_ipv6_matches_policy() {
 
     assert_allow(eval(engine.as_ref(), &pki, "[::1]:8443").await);
 
-    assert_deny(eval(engine.as_ref(), &pki, "[::1]:443").await);
+    assert_deny(&eval(engine.as_ref(), &pki, "[::1]:443").await);
     registry.cleanup().await;
 }

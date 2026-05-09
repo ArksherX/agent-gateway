@@ -35,7 +35,7 @@ fn assert_field_eq(event: &common::CapturedEvent, field: &str, expected: &str) {
 
 fn assert_field_present(event: &common::CapturedEvent, field: &str) {
     assert!(
-        event.fields.get(field).is_some(),
+        event.fields.contains_key(field),
         "{field} should be present"
     );
 }
@@ -72,7 +72,7 @@ impl ResolvesClientCert for MismatchedClientCertResolver {
 
 #[tokio::test]
 async fn tunnel_echoes_data() {
-    let _guard = serial_test_lock();
+    let _guard = serial_test_lock().await;
     let log = init_tracing_capture();
     drain_events(&log);
 
@@ -140,7 +140,7 @@ async fn tunnel_echoes_data() {
 
 #[tokio::test]
 async fn tunnel_policy_deny() {
-    let _guard = serial_test_lock();
+    let _guard = serial_test_lock().await;
     let log = init_tracing_capture();
     drain_events(&log);
 
@@ -181,7 +181,7 @@ async fn tunnel_policy_deny() {
 
 #[tokio::test]
 async fn tunnel_unreachable_destination() {
-    let _guard = serial_test_lock();
+    let _guard = serial_test_lock().await;
     let log = init_tracing_capture();
     drain_events(&log);
 
@@ -218,7 +218,7 @@ async fn tunnel_unreachable_destination() {
 
 #[tokio::test]
 async fn non_connect_method_rejected() {
-    let _guard = serial_test_lock();
+    let _guard = serial_test_lock().await;
     let log = init_tracing_capture();
     drain_events(&log);
 
@@ -260,7 +260,7 @@ async fn non_connect_method_rejected() {
 
 #[tokio::test]
 async fn tunnel_wrong_extension_denied() {
-    let _guard = serial_test_lock();
+    let _guard = serial_test_lock().await;
     let log = init_tracing_capture();
     drain_events(&log);
 
@@ -311,7 +311,7 @@ async fn tunnel_wrong_extension_denied() {
 
 #[tokio::test]
 async fn tunnel_missing_extension_denied() {
-    let _guard = serial_test_lock();
+    let _guard = serial_test_lock().await;
     let log = init_tracing_capture();
     drain_events(&log);
 
@@ -375,7 +375,7 @@ async fn tunnel_missing_extension_denied() {
 
 #[tokio::test]
 async fn mtls_no_client_cert_rejected() {
-    let _guard = serial_test_lock();
+    let _guard = serial_test_lock().await;
     let log = init_tracing_capture();
     drain_events(&log);
 
@@ -422,7 +422,7 @@ async fn mtls_no_client_cert_rejected() {
 
 #[tokio::test]
 async fn mtls_mismatched_cert_and_private_key_rejected() {
-    let _guard = serial_test_lock();
+    let _guard = serial_test_lock().await;
     let log = init_tracing_capture();
     drain_events(&log);
 
@@ -470,7 +470,7 @@ async fn mtls_mismatched_cert_and_private_key_rejected() {
 
 #[tokio::test]
 async fn mtls_accepts_untrusted_ca_but_policy_denies_unregistered_key() {
-    let _guard = serial_test_lock();
+    let _guard = serial_test_lock().await;
     let log = init_tracing_capture();
     drain_events(&log);
 

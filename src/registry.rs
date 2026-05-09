@@ -60,7 +60,7 @@ impl RegistryStore {
         subject_public_key_spki_der: &[u8],
     ) -> anyhow::Result<Vec<CandidatePermission>> {
         let query = sqlx::query_as::<_, CandidatePermission>(
-            r#"
+            r"
             SELECT
                 p.permission_id,
                 p.subject_identity,
@@ -90,7 +90,7 @@ impl RegistryStore {
               AND p.not_after > now()
             ORDER BY p.not_after DESC
             LIMIT 16
-            "#,
+            ",
         )
         .bind(subject_identity)
         .bind(destination)
@@ -110,7 +110,7 @@ impl RegistryStore {
         permission_not_after: DateTime<Utc>,
     ) -> anyhow::Result<bool> {
         let query = sqlx::query_scalar::<_, bool>(
-            r#"
+            r"
             SELECT EXISTS (
                 SELECT 1
                 FROM principal_key_permissions
@@ -122,7 +122,7 @@ impl RegistryStore {
                   AND not_before <= $3
                   AND not_after >= $4
             )
-            "#,
+            ",
         )
         .bind(signing_key_id)
         .bind(destination)

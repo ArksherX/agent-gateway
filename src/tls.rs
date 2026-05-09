@@ -16,6 +16,12 @@ use x509_parser::prelude::*;
 
 use crate::config::ServerConfig as AppServerConfig;
 
+/// Build the rustls server config used by the gateway listener.
+///
+/// # Errors
+///
+/// Returns an error if certificates or private keys cannot be read, parsed, or
+/// accepted by rustls.
 pub fn build_server_config(config: &AppServerConfig) -> anyhow::Result<Arc<ServerConfig>> {
     let cert_chain = load_cert_chain(&config.tls_cert_path)
         .with_context(|| format!("loading TLS cert from {}", config.tls_cert_path.display()))?;
@@ -31,6 +37,7 @@ pub fn build_server_config(config: &AppServerConfig) -> anyhow::Result<Arc<Serve
     Ok(Arc::new(server_config))
 }
 
+#[must_use]
 pub fn db_rooted_client_cert_verifier() -> Arc<dyn ClientCertVerifier> {
     Arc::new(DbRootedClientCertVerifier::new())
 }
