@@ -382,7 +382,7 @@ impl TestAuthzRegistry {
         let key_id = unique_id("test-key");
         let (not_before, not_after) = active_window();
 
-        sqlx::query(
+        sqlx::query!(
             r"
             INSERT INTO principal_signing_keys (
                 key_id, algorithm, public_key_spki_der,
@@ -390,11 +390,11 @@ impl TestAuthzRegistry {
             )
             VALUES ($1, 'ecdsa_p256_sha256', $2, $3, $4)
             ",
+            &key_id,
+            public_key_spki_der.as_slice(),
+            not_before,
+            not_after,
         )
-        .bind(&key_id)
-        .bind(&public_key_spki_der)
-        .bind(not_before)
-        .bind(not_after)
         .execute(&pool)
         .await
         .expect("insert test signing key");
@@ -424,21 +424,27 @@ impl TestAuthzRegistry {
     }
 
     pub async fn cleanup(&self) {
-        sqlx::query("DELETE FROM permission_registry WHERE signing_key_id = $1")
-            .bind(&self.key_id)
-            .execute(&self.pool)
-            .await
-            .expect("delete test permissions");
-        sqlx::query("DELETE FROM principal_key_permissions WHERE signing_key_id = $1")
-            .bind(&self.key_id)
-            .execute(&self.pool)
-            .await
-            .expect("delete test signer scopes");
-        sqlx::query("DELETE FROM principal_signing_keys WHERE key_id = $1")
-            .bind(&self.key_id)
-            .execute(&self.pool)
-            .await
-            .expect("delete test signing key");
+        sqlx::query!(
+            "DELETE FROM permission_registry WHERE signing_key_id = $1",
+            &self.key_id
+        )
+        .execute(&self.pool)
+        .await
+        .expect("delete test permissions");
+        sqlx::query!(
+            "DELETE FROM principal_key_permissions WHERE signing_key_id = $1",
+            &self.key_id
+        )
+        .execute(&self.pool)
+        .await
+        .expect("delete test signer scopes");
+        sqlx::query!(
+            "DELETE FROM principal_signing_keys WHERE key_id = $1",
+            &self.key_id
+        )
+        .execute(&self.pool)
+        .await
+        .expect("delete test signing key");
     }
 
     pub async fn allow(
@@ -494,28 +500,34 @@ impl TestAuthzRegistry {
     }
 
     pub async fn revoke_permission(&self, permission_id: &str) {
-        sqlx::query("UPDATE permission_registry SET revoked_at = now() WHERE permission_id = $1")
-            .bind(permission_id)
-            .execute(&self.pool)
-            .await
-            .expect("revoke permission");
+        sqlx::query!(
+            "UPDATE permission_registry SET revoked_at = now() WHERE permission_id = $1",
+            permission_id
+        )
+        .execute(&self.pool)
+        .await
+        .expect("revoke permission");
     }
 
     pub async fn revoke_signer(&self) {
-        sqlx::query("UPDATE principal_signing_keys SET revoked_at = now() WHERE key_id = $1")
-            .bind(&self.key_id)
-            .execute(&self.pool)
-            .await
-            .expect("revoke signer");
+        sqlx::query!(
+            "UPDATE principal_signing_keys SET revoked_at = now() WHERE key_id = $1",
+            &self.key_id
+        )
+        .execute(&self.pool)
+        .await
+        .expect("revoke signer");
     }
 
     pub async fn tamper_permission_destination(&self, permission_id: &str, destination: &str) {
-        sqlx::query("UPDATE permission_registry SET destination = $2 WHERE permission_id = $1")
-            .bind(permission_id)
-            .bind(destination)
-            .execute(&self.pool)
-            .await
-            .expect("tamper permission destination");
+        sqlx::query!(
+            "UPDATE permission_registry SET destination = $2 WHERE permission_id = $1",
+            permission_id,
+            destination
+        )
+        .execute(&self.pool)
+        .await
+        .expect("tamper permission destination");
     }
 
     async fn allow_inner(
@@ -529,18 +541,18 @@ impl TestAuthzRegistry {
         let (not_before, not_after) = active_window();
 
         if include_scope {
-            sqlx::query(
+            sqlx::query!(
                 r"
                 INSERT INTO principal_key_permissions (
                     signing_key_id, destination, not_before, not_after
                 )
                 VALUES ($1, $2, $3, $4)
                 ",
+                &self.key_id,
+                destination,
+                not_before,
+                not_after,
             )
-            .bind(&self.key_id)
-            .bind(destination)
-            .bind(not_before)
-            .bind(not_after)
             .execute(&self.pool)
             .await
             .expect("insert signer scope");
@@ -556,8 +568,9 @@ impl TestAuthzRegistry {
             not_after,
         );
         let signature: p256::ecdsa::Signature = self.signing_key.sign(&signed_bytes);
+        let signature_der = signature.to_der();
 
-        sqlx::query(
+        sqlx::query!(
             r"
             INSERT INTO permission_registry (
                 permission_id, signing_key_id, subject_identity, subject_public_key_spki_der, destination,
@@ -565,15 +578,15 @@ impl TestAuthzRegistry {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ",
+            &permission_id,
+            &self.key_id,
+            subject_identity,
+            subject_public_key_spki_der,
+            destination,
+            not_before,
+            not_after,
+            signature_der.as_bytes(),
         )
-        .bind(&permission_id)
-        .bind(&self.key_id)
-        .bind(subject_identity)
-        .bind(subject_public_key_spki_der)
-        .bind(destination)
-        .bind(not_before)
-        .bind(not_after)
-        .bind(signature.to_der().as_bytes())
         .execute(&self.pool)
         .await
         .expect("insert signed permission");

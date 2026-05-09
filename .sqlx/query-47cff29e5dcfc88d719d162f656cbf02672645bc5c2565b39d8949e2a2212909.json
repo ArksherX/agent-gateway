@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO principal_key_permissions (\n                    signing_key_id, destination, not_before, not_after\n                )\n                VALUES ($1, $2, $3, $4)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "47cff29e5dcfc88d719d162f656cbf02672645bc5c2565b39d8949e2a2212909"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE permission_registry SET revoked_at = now() WHERE permission_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5ec9ac85b3956ecac884f312e7a8f21540c6f986aec6c6cc0f4b7ff53ffcc68a"
+}

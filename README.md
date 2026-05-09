@@ -151,3 +151,15 @@ cargo test
 ```
 
 Database-backed policy and e2e tests require `TEST_DATABASE_URL` to point at a Postgres database that the test process can migrate and write to. The tests cover policy evaluation, signed-permission verification, signer delegation scope enforcement, destination normalization, config validation, TLS PKI generation, and proxy request parsing.
+
+## SQLx Query Metadata
+
+Checked SQLx query macros compile against committed `.sqlx` metadata by default, so normal builds do not need database access. The metadata is derived from the migrations; it does not replace the migration SQL used to create or update the database schema.
+
+Regenerate the metadata after changing migrations or SQL query text:
+
+```bash
+cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features postgres
+SQLX_OFFLINE=false DATABASE_URL="$TEST_DATABASE_URL" cargo sqlx database setup
+SQLX_OFFLINE=false DATABASE_URL="$TEST_DATABASE_URL" cargo sqlx prepare -- --all-targets --locked
+```

@@ -1,0 +1,102 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                p.permission_id,\n                p.subject_identity,\n                p.subject_public_key_spki_der,\n                p.destination,\n                p.signing_key_id,\n                p.not_before AS \"permission_not_before!\",\n                p.not_after AS \"permission_not_after!\",\n                p.signature,\n                s.algorithm AS \"signer_algorithm!\",\n                s.public_key_spki_der AS \"signer_public_key_spki_der!\",\n                s.not_before AS \"signer_not_before!\",\n                s.not_after AS \"signer_not_after!\",\n                s.revoked_at AS signer_revoked_at,\n                (\n                    s.revoked_at IS NULL\n                    AND s.not_before <= now()\n                    AND s.not_after > now()\n                ) AS \"signer_active_now!\"\n            FROM permission_registry p\n            JOIN principal_signing_keys s ON s.key_id = p.signing_key_id\n            WHERE p.subject_identity = $1\n              AND p.destination = $2\n              AND p.subject_public_key_spki_der = $3\n              AND p.revoked_at IS NULL\n              AND p.not_before <= now()\n              AND p.not_after > now()\n            ORDER BY p.not_after DESC\n            LIMIT 16\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "permission_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "subject_identity",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "subject_public_key_spki_der",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 3,
+        "name": "destination",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "signing_key_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "permission_not_before!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "permission_not_after!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "signature",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 8,
+        "name": "signer_algorithm!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "signer_public_key_spki_der!",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 10,
+        "name": "signer_not_before!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "signer_not_after!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "signer_revoked_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "signer_active_now!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "e3b8aebb3bd68bb84e6d09cb0b214c5ba1e25a847aea0e877f2a6682a760efa6"
+}

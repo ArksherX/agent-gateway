@@ -12,7 +12,7 @@ pub(crate) struct RegistryStore {
     query_timeout: Duration,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub(crate) struct CandidatePermission {
     pub(crate) permission_id: String,
     pub(crate) subject_identity: String,
@@ -39,7 +39,7 @@ impl RegistryStore {
     }
 
     pub(crate) async fn verify_schema_version(pool: &PgPool) -> anyhow::Result<()> {
-        let version = sqlx::query_scalar::<_, i32>(
+        let version = sqlx::query_scalar!(
             "SELECT version FROM agent_gateway_schema_version ORDER BY version DESC LIMIT 1",
         )
         .fetch_one(pool)
@@ -59,27 +59,28 @@ impl RegistryStore {
         destination: &str,
         subject_public_key_spki_der: &[u8],
     ) -> anyhow::Result<Vec<CandidatePermission>> {
-        let query = sqlx::query_as::<_, CandidatePermission>(
-            r"
+        let query = sqlx::query_as!(
+            CandidatePermission,
+            r#"
             SELECT
                 p.permission_id,
                 p.subject_identity,
                 p.subject_public_key_spki_der,
                 p.destination,
                 p.signing_key_id,
-                p.not_before AS permission_not_before,
-                p.not_after AS permission_not_after,
+                p.not_before AS "permission_not_before!",
+                p.not_after AS "permission_not_after!",
                 p.signature,
-                s.algorithm AS signer_algorithm,
-                s.public_key_spki_der AS signer_public_key_spki_der,
-                s.not_before AS signer_not_before,
-                s.not_after AS signer_not_after,
+                s.algorithm AS "signer_algorithm!",
+                s.public_key_spki_der AS "signer_public_key_spki_der!",
+                s.not_before AS "signer_not_before!",
+                s.not_after AS "signer_not_after!",
                 s.revoked_at AS signer_revoked_at,
                 (
                     s.revoked_at IS NULL
                     AND s.not_before <= now()
                     AND s.not_after > now()
-                ) AS signer_active_now
+                ) AS "signer_active_now!"
             FROM permission_registry p
             JOIN principal_signing_keys s ON s.key_id = p.signing_key_id
             WHERE p.subject_identity = $1
@@ -90,11 +91,11 @@ impl RegistryStore {
               AND p.not_after > now()
             ORDER BY p.not_after DESC
             LIMIT 16
-            ",
-        )
-        .bind(subject_identity)
-        .bind(destination)
-        .bind(subject_public_key_spki_der);
+            "#,
+            subject_identity,
+            destination,
+            subject_public_key_spki_der,
+        );
 
         tokio::time::timeout(self.query_timeout, query.fetch_all(&self.pool))
             .await
@@ -109,8 +110,8 @@ impl RegistryStore {
         permission_not_before: DateTime<Utc>,
         permission_not_after: DateTime<Utc>,
     ) -> anyhow::Result<bool> {
-        let query = sqlx::query_scalar::<_, bool>(
-            r"
+        let query = sqlx::query_scalar!(
+            r#"
             SELECT EXISTS (
                 SELECT 1
                 FROM principal_key_permissions
@@ -121,13 +122,13 @@ impl RegistryStore {
                   AND not_after > now()
                   AND not_before <= $3
                   AND not_after >= $4
-            )
-            ",
-        )
-        .bind(signing_key_id)
-        .bind(destination)
-        .bind(permission_not_before)
-        .bind(permission_not_after);
+            ) AS "exists!"
+            "#,
+            signing_key_id,
+            destination,
+            permission_not_before,
+            permission_not_after,
+        );
 
         tokio::time::timeout(self.query_timeout, query.fetch_one(&self.pool))
             .await

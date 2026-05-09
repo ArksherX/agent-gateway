@@ -29,7 +29,7 @@ opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["rt-tokio", "trace"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace"] }
 anyhow = "1"
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "derive"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "macros"] }
 chrono = "0.4.44"
 p256 = { version = "0.13.2", features = ["ecdsa", "pkcs8"] }
 
