@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE permission_registry SET destination = $2 WHERE permission_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f11acb3b0cda9d25dc5c2e17886b2dbfeea4294861273777f0a725658caaea05"
+}

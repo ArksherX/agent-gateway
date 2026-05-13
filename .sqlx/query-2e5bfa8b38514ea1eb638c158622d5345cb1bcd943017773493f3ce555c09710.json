@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO permission_registry (\n                permission_id, signing_key_id, subject_identity, subject_public_key_spki_der, destination,\n                not_before, not_after, signature\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Bytea",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2e5bfa8b38514ea1eb638c158622d5345cb1bcd943017773493f3ce555c09710"
+}

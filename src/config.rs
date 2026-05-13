@@ -41,6 +41,12 @@ pub struct PolicyConfig {
 }
 
 impl Config {
+    /// Load, parse, and validate a TOML config file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, the TOML cannot be parsed,
+    /// or any config value fails validation.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let contents = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&contents)?;
@@ -61,6 +67,12 @@ impl Config {
 }
 
 impl PolicyConfig {
+    /// Resolve the configured database URL from the literal value or env var.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no source is configured, both sources are configured,
+    /// the configured source is empty, or the environment variable cannot be read.
     pub fn database_url(&self) -> anyhow::Result<String> {
         match (&self.database_url, &self.database_url_env) {
             (Some(url), None) => {
@@ -89,18 +101,22 @@ impl PolicyConfig {
         }
     }
 
+    #[must_use]
     pub fn max_connections(&self) -> u32 {
         self.max_connections.unwrap_or(5)
     }
 
+    #[must_use]
     pub fn connect_timeout(&self) -> Duration {
         Duration::from_millis(self.connect_timeout_ms.unwrap_or(5_000))
     }
 
+    #[must_use]
     pub fn pool_acquire_timeout(&self) -> Duration {
         Duration::from_millis(self.pool_acquire_timeout_ms.unwrap_or(1_000))
     }
 
+    #[must_use]
     pub fn query_timeout(&self) -> Duration {
         Duration::from_millis(self.query_timeout_ms.unwrap_or(500))
     }
@@ -119,13 +135,13 @@ impl PolicyConfig {
 
         match (&self.database_url, &self.database_url_env) {
             (Some(url), None) => {
-                anyhow::ensure!(!url.is_empty(), "policy.database_url must not be empty")
+                anyhow::ensure!(!url.is_empty(), "policy.database_url must not be empty");
             }
             (None, Some(env_name)) => {
                 anyhow::ensure!(
                     !env_name.is_empty(),
                     "policy.database_url_env must not be empty"
-                )
+                );
             }
             (None, None) => {
                 anyhow::bail!("policy.database_url or policy.database_url_env is required")

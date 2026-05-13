@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT EXISTS (\n                SELECT 1\n                FROM principal_key_permissions\n                WHERE signing_key_id = $1\n                  AND destination = $2\n                  AND revoked_at IS NULL\n                  AND not_before <= now()\n                  AND not_after > now()\n                  AND not_before <= $3\n                  AND not_after >= $4\n            ) AS \"exists!\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "cd2c5f37e6caabc0789ca458e8bc52f23b750c3555030c5c15c40a5a13226b8f"
+}

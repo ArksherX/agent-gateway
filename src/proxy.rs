@@ -32,7 +32,7 @@ impl Extractor for HeaderExtractor<'_> {
     }
 
     fn keys(&self) -> Vec<&str> {
-        self.0.keys().map(|name| name.as_str()).collect()
+        self.0.keys().map(http::HeaderName::as_str).collect()
     }
 }
 
@@ -96,29 +96,14 @@ impl ProxyService {
                     source_identity
                 }
                 PolicyDecision::Deny {
-                    source_identity: Some(source_identity),
+                    source_identity,
                     reason,
                 } => {
-                    warn!(
-                        source_identity = %source_identity,
-                        source_peer_addr = %self.source_peer_addr,
-                        dest_authority = %dest.authority,
-                        policy_decision = "deny",
-                        deny_reason = %reason,
-                        "CONNECT denied"
-                    );
-                    return response(StatusCode::FORBIDDEN, "forbidden");
-                }
-                PolicyDecision::Deny {
-                    source_identity: None,
-                    reason,
-                } => {
-                    warn!(
-                        source_peer_addr = %self.source_peer_addr,
-                        dest_authority = %dest.authority,
-                        policy_decision = "deny",
-                        deny_reason = %reason,
-                        "CONNECT denied"
+                    log_denial(
+                        source_identity.as_deref(),
+                        self.source_peer_addr,
+                        &dest.authority,
+                        &reason,
                     );
                     return response(StatusCode::FORBIDDEN, "forbidden");
                 }
@@ -126,7 +111,7 @@ impl ProxyService {
 
             // Connect to destination BEFORE returning 200 so the client knows
             // the tunnel is actually established.
-            let mut upstream = match TcpStream::connect((&*dest.host, dest.port)).await {
+            let upstream = match TcpStream::connect((&*dest.host, dest.port)).await {
                 Ok(s) => s,
                 Err(e) => {
                     error!(
@@ -141,50 +126,12 @@ impl ProxyService {
             };
 
             let on_upgrade = hyper::upgrade::on(req);
-            let source_peer_addr = self.source_peer_addr;
-
-            let tunnel_span = tracing::Span::current();
-            tokio::spawn(
-                async move {
-                    let upgraded = match on_upgrade.await {
-                        Ok(u) => u,
-                        Err(e) => {
-                            warn!(
-                                source_identity = %source_identity,
-                                source_peer_addr = %source_peer_addr,
-                                dest_authority = %dest.authority,
-                                error = %e,
-                                "upgrade failed"
-                            );
-                            return;
-                        }
-                    };
-
-                    let mut downstream = hyper_util::rt::TokioIo::new(upgraded);
-
-                    match copy_bidirectional(&mut downstream, &mut upstream).await {
-                        Ok((up, down)) => {
-                            info!(
-                                source_identity = %source_identity,
-                                source_peer_addr = %source_peer_addr,
-                                dest_authority = %dest.authority,
-                                bytes_client_to_dest = up,
-                                bytes_dest_to_client = down,
-                                "tunnel closed"
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                source_identity = %source_identity,
-                                source_peer_addr = %source_peer_addr,
-                                dest_authority = %dest.authority,
-                                error = %e,
-                                "tunnel error"
-                            );
-                        }
-                    }
-                }
-                .instrument(tunnel_span),
+            spawn_tunnel(
+                on_upgrade,
+                upstream,
+                source_identity,
+                self.source_peer_addr,
+                dest.authority,
             );
 
             response(StatusCode::OK, "")
@@ -214,6 +161,7 @@ impl MakeProxyService {
         Self { policy_engine }
     }
 
+    #[must_use]
     pub fn make_service(
         &self,
         peer_certs: Vec<CertificateDer<'static>>,
@@ -223,10 +171,89 @@ impl MakeProxyService {
     }
 }
 
+#[must_use]
 pub fn extract_peer_certs(conn: &ServerConnection) -> Vec<CertificateDer<'static>> {
     conn.peer_certificates()
-        .map(|certs| certs.to_vec())
+        .map(<[CertificateDer<'_>]>::to_vec)
         .unwrap_or_default()
+}
+
+fn log_denial(
+    source_identity: Option<&str>,
+    source_peer_addr: SocketAddr,
+    dest_authority: &str,
+    reason: &str,
+) {
+    if let Some(source_identity) = source_identity {
+        warn!(
+            source_identity = %source_identity,
+            source_peer_addr = %source_peer_addr,
+            dest_authority = %dest_authority,
+            policy_decision = "deny",
+            deny_reason = %reason,
+            "CONNECT denied"
+        );
+    } else {
+        warn!(
+            source_peer_addr = %source_peer_addr,
+            dest_authority = %dest_authority,
+            policy_decision = "deny",
+            deny_reason = %reason,
+            "CONNECT denied"
+        );
+    }
+}
+
+fn spawn_tunnel(
+    on_upgrade: hyper::upgrade::OnUpgrade,
+    mut upstream: TcpStream,
+    source_identity: String,
+    source_peer_addr: SocketAddr,
+    dest_authority: String,
+) {
+    let tunnel_span = tracing::Span::current();
+    tokio::spawn(
+        async move {
+            let upgraded = match on_upgrade.await {
+                Ok(u) => u,
+                Err(e) => {
+                    warn!(
+                        source_identity = %source_identity,
+                        source_peer_addr = %source_peer_addr,
+                        dest_authority = %dest_authority,
+                        error = %e,
+                        "upgrade failed"
+                    );
+                    return;
+                }
+            };
+
+            let mut downstream = hyper_util::rt::TokioIo::new(upgraded);
+
+            match copy_bidirectional(&mut downstream, &mut upstream).await {
+                Ok((up, down)) => {
+                    info!(
+                        source_identity = %source_identity,
+                        source_peer_addr = %source_peer_addr,
+                        dest_authority = %dest_authority,
+                        bytes_client_to_dest = up,
+                        bytes_dest_to_client = down,
+                        "tunnel closed"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        source_identity = %source_identity,
+                        source_peer_addr = %source_peer_addr,
+                        dest_authority = %dest_authority,
+                        error = %e,
+                        "tunnel error"
+                    );
+                }
+            }
+        }
+        .instrument(tunnel_span),
+    );
 }
 
 fn response(status: StatusCode, message: &str) -> Response<ProxyBody> {

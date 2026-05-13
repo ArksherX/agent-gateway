@@ -149,7 +149,7 @@ impl TestPki {
     }
 
     pub fn client_spki_der(&self) -> Vec<u8> {
-        certificate_spki_der(&self.client_cert.der().to_vec())
+        certificate_spki_der(self.client_cert.der())
     }
 }
 
@@ -168,16 +168,19 @@ fn der_encode_utf8_string(value: &str) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(2 + len);
     encoded.push(0x0c); // UTF8String tag
     if len < 128 {
-        encoded.push(len as u8);
+        encoded.push(u8::try_from(len).expect("short-form DER length fits in u8"));
     } else {
         let mut len_bytes = Vec::new();
         let mut remaining = len;
         while remaining > 0 {
-            len_bytes.push((remaining & 0xff) as u8);
+            len_bytes
+                .push(u8::try_from(remaining & 0xff).expect("masked DER length byte fits in u8"));
             remaining >>= 8;
         }
         len_bytes.reverse();
-        encoded.push(0x80 | (len_bytes.len() as u8));
+        let len_byte_count =
+            u8::try_from(len_bytes.len()).expect("DER length-of-length fits in u8");
+        encoded.push(0x80 | len_byte_count);
         encoded.extend_from_slice(&len_bytes);
     }
     encoded.extend_from_slice(value_bytes);
@@ -323,10 +326,10 @@ pub async fn wait_for_event(
 
 /// Acquire an exclusive lock for e2e tests that share a global tracing subscriber.
 /// Hold the returned guard for the duration of the test.
-static E2E_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static E2E_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-pub fn serial_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    E2E_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+pub async fn serial_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    E2E_MUTEX.lock().await
 }
 
 pub fn install_test_crypto_provider() {
@@ -379,19 +382,19 @@ impl TestAuthzRegistry {
         let key_id = unique_id("test-key");
         let (not_before, not_after) = active_window();
 
-        sqlx::query(
-            r#"
+        sqlx::query!(
+            r"
             INSERT INTO principal_signing_keys (
                 key_id, algorithm, public_key_spki_der,
                 not_before, not_after
             )
             VALUES ($1, 'ecdsa_p256_sha256', $2, $3, $4)
-            "#,
+            ",
+            &key_id,
+            public_key_spki_der.as_slice(),
+            not_before,
+            not_after,
         )
-        .bind(&key_id)
-        .bind(&public_key_spki_der)
-        .bind(not_before)
-        .bind(not_after)
         .execute(&pool)
         .await
         .expect("insert test signing key");
@@ -421,21 +424,27 @@ impl TestAuthzRegistry {
     }
 
     pub async fn cleanup(&self) {
-        sqlx::query("DELETE FROM permission_registry WHERE signing_key_id = $1")
-            .bind(&self.key_id)
-            .execute(&self.pool)
-            .await
-            .expect("delete test permissions");
-        sqlx::query("DELETE FROM principal_key_permissions WHERE signing_key_id = $1")
-            .bind(&self.key_id)
-            .execute(&self.pool)
-            .await
-            .expect("delete test signer scopes");
-        sqlx::query("DELETE FROM principal_signing_keys WHERE key_id = $1")
-            .bind(&self.key_id)
-            .execute(&self.pool)
-            .await
-            .expect("delete test signing key");
+        sqlx::query!(
+            "DELETE FROM permission_registry WHERE signing_key_id = $1",
+            &self.key_id
+        )
+        .execute(&self.pool)
+        .await
+        .expect("delete test permissions");
+        sqlx::query!(
+            "DELETE FROM principal_key_permissions WHERE signing_key_id = $1",
+            &self.key_id
+        )
+        .execute(&self.pool)
+        .await
+        .expect("delete test signer scopes");
+        sqlx::query!(
+            "DELETE FROM principal_signing_keys WHERE key_id = $1",
+            &self.key_id
+        )
+        .execute(&self.pool)
+        .await
+        .expect("delete test signing key");
     }
 
     pub async fn allow(
@@ -491,28 +500,34 @@ impl TestAuthzRegistry {
     }
 
     pub async fn revoke_permission(&self, permission_id: &str) {
-        sqlx::query("UPDATE permission_registry SET revoked_at = now() WHERE permission_id = $1")
-            .bind(permission_id)
-            .execute(&self.pool)
-            .await
-            .expect("revoke permission");
+        sqlx::query!(
+            "UPDATE permission_registry SET revoked_at = now() WHERE permission_id = $1",
+            permission_id
+        )
+        .execute(&self.pool)
+        .await
+        .expect("revoke permission");
     }
 
     pub async fn revoke_signer(&self) {
-        sqlx::query("UPDATE principal_signing_keys SET revoked_at = now() WHERE key_id = $1")
-            .bind(&self.key_id)
-            .execute(&self.pool)
-            .await
-            .expect("revoke signer");
+        sqlx::query!(
+            "UPDATE principal_signing_keys SET revoked_at = now() WHERE key_id = $1",
+            &self.key_id
+        )
+        .execute(&self.pool)
+        .await
+        .expect("revoke signer");
     }
 
     pub async fn tamper_permission_destination(&self, permission_id: &str, destination: &str) {
-        sqlx::query("UPDATE permission_registry SET destination = $2 WHERE permission_id = $1")
-            .bind(permission_id)
-            .bind(destination)
-            .execute(&self.pool)
-            .await
-            .expect("tamper permission destination");
+        sqlx::query!(
+            "UPDATE permission_registry SET destination = $2 WHERE permission_id = $1",
+            permission_id,
+            destination
+        )
+        .execute(&self.pool)
+        .await
+        .expect("tamper permission destination");
     }
 
     async fn allow_inner(
@@ -526,18 +541,18 @@ impl TestAuthzRegistry {
         let (not_before, not_after) = active_window();
 
         if include_scope {
-            sqlx::query(
-                r#"
+            sqlx::query!(
+                r"
                 INSERT INTO principal_key_permissions (
                     signing_key_id, destination, not_before, not_after
                 )
                 VALUES ($1, $2, $3, $4)
-                "#,
+                ",
+                &self.key_id,
+                destination,
+                not_before,
+                not_after,
             )
-            .bind(&self.key_id)
-            .bind(destination)
-            .bind(not_before)
-            .bind(not_after)
             .execute(&self.pool)
             .await
             .expect("insert signer scope");
@@ -553,24 +568,25 @@ impl TestAuthzRegistry {
             not_after,
         );
         let signature: p256::ecdsa::Signature = self.signing_key.sign(&signed_bytes);
+        let signature_der = signature.to_der();
 
-        sqlx::query(
-            r#"
+        sqlx::query!(
+            r"
             INSERT INTO permission_registry (
                 permission_id, signing_key_id, subject_identity, subject_public_key_spki_der, destination,
                 not_before, not_after, signature
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            "#,
+            ",
+            &permission_id,
+            &self.key_id,
+            subject_identity,
+            subject_public_key_spki_der,
+            destination,
+            not_before,
+            not_after,
+            signature_der.as_bytes(),
         )
-        .bind(&permission_id)
-        .bind(&self.key_id)
-        .bind(subject_identity)
-        .bind(subject_public_key_spki_der)
-        .bind(destination)
-        .bind(not_before)
-        .bind(not_after)
-        .bind(signature.to_der().as_bytes())
         .execute(&self.pool)
         .await
         .expect("insert signed permission");
@@ -702,9 +718,8 @@ pub async fn start_proxy(
 
     let task = tokio::spawn(async move {
         loop {
-            let (tcp, peer) = match listener.accept().await {
-                Ok(c) => c,
-                Err(_) => continue,
+            let Ok((tcp, peer)) = listener.accept().await else {
+                continue;
             };
             let acceptor = tls_acceptor.clone();
             let svc = make_service.clone();
@@ -736,7 +751,7 @@ pub async fn start_proxy(
     (addr, ServerGuard { task })
 }
 
-/// Connect an HTTP/2 mTLS client to the proxy. Returns a SendRequest handle.
+/// Connect an HTTP/2 mTLS client to the proxy. Returns a `SendRequest` handle.
 pub async fn connect_client(
     proxy_addr: SocketAddr,
     pki: &TestPki,

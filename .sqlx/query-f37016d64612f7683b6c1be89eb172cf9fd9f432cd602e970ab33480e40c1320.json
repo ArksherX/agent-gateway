@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE principal_signing_keys SET revoked_at = now() WHERE key_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f37016d64612f7683b6c1be89eb172cf9fd9f432cd602e970ab33480e40c1320"
+}

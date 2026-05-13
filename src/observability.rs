@@ -12,6 +12,12 @@ use crate::config::ObservabilityConfig;
 
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
+/// Initialize tracing and optional OpenTelemetry export.
+///
+/// # Errors
+///
+/// Returns an error if the OTLP exporter cannot be built or the global tracing
+/// subscriber cannot be initialized.
 pub fn init(config: &ObservabilityConfig) -> anyhow::Result<()> {
     global::set_text_map_propagator(TraceContextPropagator::new());
 
@@ -55,14 +61,12 @@ pub fn init(config: &ObservabilityConfig) -> anyhow::Result<()> {
 }
 
 fn stdout_logging_enabled() -> bool {
-    std::env::var("AGENT_GATEWAY_LOG_STDOUT")
-        .map(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off" | "no"
-            )
-        })
-        .unwrap_or(true)
+    std::env::var("AGENT_GATEWAY_LOG_STDOUT").map_or(true, |value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        )
+    })
 }
 
 pub fn shutdown() {

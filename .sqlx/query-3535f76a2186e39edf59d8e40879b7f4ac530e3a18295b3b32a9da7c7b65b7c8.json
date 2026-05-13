@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM principal_key_permissions WHERE signing_key_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3535f76a2186e39edf59d8e40879b7f4ac530e3a18295b3b32a9da7c7b65b7c8"
+}
