@@ -163,3 +163,7 @@ cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features
 SQLX_OFFLINE=false DATABASE_URL="$TEST_DATABASE_URL" cargo sqlx database setup
 SQLX_OFFLINE=false DATABASE_URL="$TEST_DATABASE_URL" cargo sqlx prepare -- --all-targets --locked
 ```
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
