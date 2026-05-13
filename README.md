@@ -11,7 +11,7 @@ cargo build --release
 ```
 
 The end-to-end demo, sidecar, TPM setup, mock services, and registry helper
-scripts live in the split demo repository. The demo pins a gateway image such as
+scripts live in the [split demo repository](https://github.com/sl5taskforce/agent-gateway-demo). The demo pins a gateway image such as
 `ghcr.io/sl5taskforce/agent-gateway:main` and does not require this source checkout.
 
 ## Configuration
