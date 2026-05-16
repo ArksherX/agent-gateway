@@ -5,12 +5,38 @@ use serde::Deserialize;
 
 use crate::policy;
 
+/// Per-identity byte-rate limiting configuration.
+/// Set `bytes_per_second = 0` to disable (default).
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct RateLimitConfig {
+    #[serde(default)]
+    pub bytes_per_second: u64,
+    #[serde(default = "default_burst_bytes")]
+    pub burst_bytes: u64,
+}
+
+fn default_burst_bytes() -> u64 {
+    1_048_576 // 1 MB
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            bytes_per_second: 0,
+            burst_bytes: default_burst_bytes(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+// Note: deny_unknown_fields removed from Config so the optional
+// [rate_limit] section can be absent from existing config files.
 pub struct Config {
     pub server: ServerConfig,
     pub observability: ObservabilityConfig,
     pub policy: PolicyConfig,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
 }
 
 #[derive(Debug, Deserialize)]

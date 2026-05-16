@@ -9,10 +9,11 @@ use hyper_util::rt::TokioExecutor;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
+mod rate_limit;
+
 #[derive(Parser)]
 #[command(name = "agent_gateway", about = "mTLS HTTP/2 CONNECT proxy")]
 struct Cli {
-    /// Path to the TOML configuration file
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
 }
@@ -37,7 +38,9 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let tls_acceptor = tls::TlsAcceptor::from(server_tls);
 
     let policy_engine = policy::build_engine(&config.policy).await?;
-    let make_service = Arc::new(MakeProxyService::new(policy_engine));
+
+    // Pass rate_limit config into the service — used in spawn_tunnel
+    let make_service = Arc::new(MakeProxyService::new(policy_engine, config.rate_limit));
 
     let listen_addr: std::net::SocketAddr = config.server.listen_addr.parse()?;
     let listener = TcpListener::bind(listen_addr).await?;

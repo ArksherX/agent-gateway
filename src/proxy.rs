@@ -20,7 +20,9 @@ use tokio::net::TcpStream;
 use tracing::{Instrument, error, info, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use crate::config::RateLimitConfig;
 use crate::policy::{self, PolicyDecision, PolicyEngine, RequestContext};
+use crate::rate_limit::{RateLimiterRegistry, copy_with_rate_limit, get_or_create, new_registry};
 
 type ProxyBody = BoxBody<Bytes, Infallible>;
 
@@ -45,6 +47,8 @@ pub struct ProxyService {
     policy_engine: Arc<dyn PolicyEngine>,
     peer_certs: Vec<CertificateDer<'static>>,
     source_peer_addr: SocketAddr,
+    rate_limiters: RateLimiterRegistry,
+    rate_limit_config: RateLimitConfig,
 }
 
 impl ProxyService {
@@ -52,11 +56,15 @@ impl ProxyService {
         policy_engine: Arc<dyn PolicyEngine>,
         peer_certs: Vec<CertificateDer<'static>>,
         source_peer_addr: SocketAddr,
+        rate_limiters: RateLimiterRegistry,
+        rate_limit_config: RateLimitConfig,
     ) -> Self {
         Self {
             policy_engine,
             peer_certs,
             source_peer_addr,
+            rate_limiters,
+            rate_limit_config,
         }
     }
 
@@ -109,8 +117,6 @@ impl ProxyService {
                 }
             };
 
-            // Connect to destination BEFORE returning 200 so the client knows
-            // the tunnel is actually established.
             let upstream = match TcpStream::connect((&*dest.host, dest.port)).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -132,6 +138,8 @@ impl ProxyService {
                 source_identity,
                 self.source_peer_addr,
                 dest.authority,
+                self.rate_limiters.clone(),
+                self.rate_limit_config, // clone so self isn't partially moved
             );
 
             response(StatusCode::OK, "")
@@ -154,11 +162,17 @@ impl Service<Request<Incoming>> for ProxyService {
 
 pub struct MakeProxyService {
     policy_engine: Arc<dyn PolicyEngine>,
+    rate_limiters: RateLimiterRegistry,
+    rate_limit_config: RateLimitConfig,
 }
 
 impl MakeProxyService {
-    pub fn new(policy_engine: Arc<dyn PolicyEngine>) -> Self {
-        Self { policy_engine }
+    pub fn new(policy_engine: Arc<dyn PolicyEngine>, rate_limit_config: RateLimitConfig) -> Self {
+        Self {
+            policy_engine,
+            rate_limiters: new_registry(),
+            rate_limit_config,
+        }
     }
 
     #[must_use]
@@ -167,7 +181,13 @@ impl MakeProxyService {
         peer_certs: Vec<CertificateDer<'static>>,
         source_peer_addr: SocketAddr,
     ) -> ProxyService {
-        ProxyService::new(self.policy_engine.clone(), peer_certs, source_peer_addr)
+        ProxyService::new(
+            self.policy_engine.clone(),
+            peer_certs,
+            source_peer_addr,
+            self.rate_limiters.clone(),
+            self.rate_limit_config,
+        )
     }
 }
 
@@ -210,6 +230,8 @@ fn spawn_tunnel(
     source_identity: String,
     source_peer_addr: SocketAddr,
     dest_authority: String,
+    rate_limiters: RateLimiterRegistry,
+    rate_limit_config: RateLimitConfig,
 ) {
     let tunnel_span = tracing::Span::current();
     tokio::spawn(
@@ -230,7 +252,27 @@ fn spawn_tunnel(
 
             let mut downstream = hyper_util::rt::TokioIo::new(upgraded);
 
-            match copy_bidirectional(&mut downstream, &mut upstream).await {
+            let result = if rate_limit_config.bytes_per_second > 0 {
+                let limiter = get_or_create(
+                    &rate_limiters,
+                    &source_identity,
+                    u32::try_from(rate_limit_config.bytes_per_second.min(u64::from(u32::MAX)))
+                        .unwrap_or(u32::MAX),
+                    u32::try_from(rate_limit_config.burst_bytes.min(u64::from(u32::MAX)))
+                        .unwrap_or(u32::MAX),
+                );
+                tracing::debug!(
+                    source_identity = %source_identity,
+                    bytes_per_second = rate_limit_config.bytes_per_second,
+                    "rate limiting enabled for connection"
+                );
+                copy_with_rate_limit(&mut downstream, &mut upstream, limiter, &source_identity)
+                    .await
+            } else {
+                copy_bidirectional(&mut downstream, &mut upstream).await
+            };
+
+            match result {
                 Ok((up, down)) => {
                     info!(
                         source_identity = %source_identity,
@@ -289,8 +331,6 @@ impl Destination {
             return Err("empty host in CONNECT authority".into());
         }
 
-        // Authority::host() preserves brackets for IPv6 (e.g. "[::1]").
-        // Strip them so `host` is always the bare address for TcpStream::connect.
         let host = raw_host
             .strip_prefix('[')
             .and_then(|s| s.strip_suffix(']'))
@@ -299,7 +339,6 @@ impl Destination {
 
         let port = authority.port_u16().unwrap_or(443);
 
-        // Reconstruct with brackets for IPv6 to feed the canonical normalizer
         let formatted = if host.contains(':') {
             format!("[{host}]:{port}")
         } else {

@@ -16,3 +16,10 @@ max_connections = 5
 connect_timeout_ms = 5000
 pool_acquire_timeout_ms = 1000
 query_timeout_ms = 500
+[rate_limit]
+# Per-identity byte rate limit. Set to 0 to disable (default).
+# Each agent identity (from the X.509 certificate extension) gets
+# an independent token bucket. Limits sustained exfiltration throughput.
+# Example: 10_485_760 = 10 MB/s
+bytes_per_second = 0
+burst_bytes = 1048576
